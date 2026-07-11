@@ -1,0 +1,44 @@
+[package]
+name = "easyapi"
+version = "0.1.0"
+description = "A local Responses API proxy with manual provider switching"
+authors = ["wsp"]
+edition = "2021"
+
+[lib]
+name = "easyapi_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arc-swap = "1.7"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["http2"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+http = "1"
+keyring = { version = "3", features = ["windows-native"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "http2", "json", "stream", "system-proxy"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+thiserror = "2"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+
+
+
