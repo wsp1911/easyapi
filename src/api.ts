@@ -64,6 +64,7 @@ export const api = {
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   switchProvider: (id: string) => invoke<void>("switch_provider", { id }),
   testProvider: (id: string) => invoke<ProviderTestResult>("test_provider", { id }),
+  listProviderModels: (id: string) => invoke<string[]>("list_provider_models", { id }),
   getStatus: () => invoke<AppStatus>("get_status"),
   listLogs: (limit = 100) => invoke<RequestLog[]>("list_request_logs", { limit }),
   getCodexSetup: () => invoke<CodexSetup>("get_codex_setup"),

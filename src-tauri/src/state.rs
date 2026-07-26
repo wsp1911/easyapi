@@ -30,6 +30,10 @@ impl ProviderRuntime {
     pub fn responses_url(&self) -> String {
         format!("{}/responses", self.provider.base_url.trim_end_matches('/'))
     }
+
+    pub fn models_url(&self) -> String {
+        format!("{}/models", self.provider.base_url.trim_end_matches('/'))
+    }
 }
 
 pub struct ProviderManager {

@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderName, AUTHORIZATION, HOST};
+use serde::Deserialize;
 use tauri::State;
 use uuid::Uuid;
 
@@ -171,6 +172,60 @@ pub async fn test_provider(
             },
         }),
     }
+}
+
+#[tauri::command]
+pub async fn list_provider_models(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let provider = state.providers.load_runtime(&id)?;
+    let mut request = state
+        .http_client
+        .get(provider.models_url())
+        .bearer_auth(provider.api_key());
+    for (name, value) in &provider.headers {
+        request = request.header(name, value);
+    }
+
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            "上游请求超时".to_string()
+        } else if error.is_connect() {
+            "无法连接上游 API".to_string()
+        } else {
+            "上游请求失败".to_string()
+        }
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = read_response_preview(response, 64 * 1024).await;
+        return Err(summarize_upstream_error(status.as_u16(), &text));
+    }
+
+    let models = response
+        .json::<ModelListResponse>()
+        .await
+        .map_err(|_| "上游返回的模型列表格式无效".to_string())?;
+    let mut ids = models
+        .data
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+#[derive(Deserialize)]
+struct ModelListResponse {
+    data: Vec<ListedModel>,
+}
+
+#[derive(Deserialize)]
+struct ListedModel {
+    id: String,
 }
 
 fn validate_provider_input(input: &mut ProviderInput) -> Result<(), String> {

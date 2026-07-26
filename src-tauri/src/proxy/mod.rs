@@ -24,6 +24,8 @@ const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/models", get(proxy_models))
+        .route("/v1/models", get(proxy_models))
         .route("/responses", post(proxy_responses))
         .route("/v1/responses", post(proxy_responses))
         .layer(TraceLayer::new_for_http())
@@ -39,6 +41,77 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response<Body> {
             "in_flight": state.stats.status(&state.providers, &state.listen_address).in_flight_requests
         }),
     )
+}
+
+async fn proxy_models(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if !authorized(request.headers(), &state.local_token) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"message": "EasyAPI local proxy authentication failed", "type": "authentication_error"}}),
+        );
+    }
+
+    let Some(provider) = state.providers.active() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"message": "No active provider is configured in EasyAPI", "type": "easyapi_configuration_error"}}),
+        );
+    };
+
+    let (parts, _) = request.into_parts();
+    let mut url = provider.models_url();
+    if let Some(query) = parts.uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let mut builder = state.http_client.get(url).header(
+        header::AUTHORIZATION,
+        format!("Bearer {}", provider.api_key()),
+    );
+    for (name, value) in &parts.headers {
+        if should_forward_request_header(name) {
+            builder = builder.header(name, value);
+        }
+    }
+    for (name, value) in &provider.headers {
+        builder = builder.header(name, value);
+    }
+
+    let upstream = match builder.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let message = sanitized_reqwest_error(&error);
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({"error": {"message": message, "type": "easyapi_upstream_error"}}),
+            );
+        }
+    };
+
+    let mut response_builder = Response::builder()
+        .status(upstream.status())
+        .header("x-easyapi-request-id", Uuid::new_v4().to_string());
+    for (name, value) in upstream.headers() {
+        if should_forward_response_header(name) {
+            response_builder = response_builder.header(name, value);
+        }
+    }
+
+    let response_stream = upstream
+        .bytes_stream()
+        .map(|item| item.map_err(|error| io::Error::other(sanitized_reqwest_error(&error))));
+    response_builder
+        .body(Body::from_stream(response_stream))
+        .unwrap_or_else(|error| {
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": {"message": error.to_string(), "type": "easyapi_internal_error"}}),
+            )
+        })
 }
 
 async fn proxy_responses(
@@ -420,6 +493,77 @@ mod tests {
             Bytes::from_static(
                 b"event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\n"
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_model_lists_with_upstream_authentication() {
+        use axum::{body::Bytes, routing::get, Router};
+        use http_body_util::BodyExt;
+        use tempfile::tempdir;
+        use tower::ServiceExt;
+
+        async fn upstream(request: Request<Body>) -> Response<Body> {
+            assert_eq!(request.uri().query(), Some("limit=1"));
+            assert_eq!(
+                request.headers()[header::AUTHORIZATION],
+                "Bearer upstream-key"
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"object":"list","data":[{"id":"test-model"}]}"#,
+                ))
+                .unwrap()
+        }
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                upstream_listener,
+                Router::new().route("/v1/models", get(upstream)),
+            )
+            .await
+            .unwrap();
+        });
+
+        let temp = tempdir().unwrap();
+        let db =
+            Arc::new(crate::storage::Database::open(&temp.path().join("models.sqlite3")).unwrap());
+        let state = crate::state::AppState::new(db, "127.0.0.1:8787".to_string()).unwrap();
+        state
+            .providers
+            .set_active_for_test(crate::state::ProviderRuntime::new_for_test(
+                crate::models::Provider {
+                    id: "models-test".to_string(),
+                    name: "Models Test".to_string(),
+                    base_url: format!("http://{upstream_address}/v1"),
+                    test_model: "test".to_string(),
+                    extra_headers: vec![],
+                    created_at: Utc::now().to_rfc3339(),
+                    updated_at: Utc::now().to_rfc3339(),
+                },
+                "upstream-key".to_string(),
+            ));
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/v1/models?limit=1")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", state.local_token),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = router(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes,
+            Bytes::from_static(br#"{"object":"list","data":[{"id":"test-model"}]}"#)
         );
     }
 

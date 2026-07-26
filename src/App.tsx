@@ -270,6 +270,8 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider?: Provider; o
     extraHeaders: provider?.extraHeaders ?? [],
   });
   const [saving, setSaving] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const valid = useMemo(() => form.name.trim() && form.baseUrl.trim() && (provider || form.apiKey?.trim()), [form, provider]);
@@ -283,6 +285,13 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider?: Provider; o
   function updateHeader(index: number, patch: Partial<HeaderPair>) {
     setForm(current => ({ ...current, extraHeaders: current.extraHeaders.map((item, i) => i === index ? { ...item, ...patch } : item) }));
   }
+  async function loadModels() {
+    if (!provider) return;
+    setLoadingModels(true); setError(null);
+    try { setModels(await api.listProviderModels(provider.id)); }
+    catch (error) { setError(errorText(error)); }
+    finally { setLoadingModels(false); }
+  }
   return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <form className="dialog" onSubmit={submit}>
       <div className="dialog-header"><div><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>API Key 将保存到 Windows Credential Manager。</p></div><button type="button" onClick={onClose}>×</button></div>
@@ -290,7 +299,9 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider?: Provider; o
       <label><span>名称</span><input autoFocus value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="例如 API-A" /></label>
       <label><span>Base URL</span><input value={form.baseUrl} onChange={e => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" /><small>EasyAPI 会在此地址后追加 /responses</small></label>
       <label><span>{provider ? "替换 API Key（留空则不修改）" : "API Key"}</span><input type="password" value={form.apiKey} onChange={e => setForm({ ...form, apiKey: e.target.value })} placeholder={provider ? "保持现有 Key" : "sk-..."} autoComplete="off" /></label>
-      <label><span>测试模型</span><input value={form.testModel} onChange={e => setForm({ ...form, testModel: e.target.value })} placeholder="用于手动连接测试，可留空" /></label>
+      <label><span className="model-field-label">测试模型{provider && <button type="button" onClick={() => void loadModels()} disabled={loadingModels}>{loadingModels ? "获取中…" : "获取模型"}</button>}</span><input list="provider-models" value={form.testModel} onChange={e => setForm({ ...form, testModel: e.target.value })} placeholder="用于手动连接测试，可留空" />
+        <datalist id="provider-models">{models.map(model => <option key={model} value={model} />)}</datalist>
+      </label>
       <div className="headers-editor"><div className="field-heading"><span>额外请求头</span><button type="button" onClick={() => setForm({ ...form, extraHeaders: [...form.extraHeaders, { name: "", value: "" }] })}>＋ 添加</button></div>
         {form.extraHeaders.map((header, index) => <div className="header-row" key={index}><input value={header.name} onChange={e => updateHeader(index, { name: e.target.value })} placeholder="Header-Name" /><input value={header.value} onChange={e => updateHeader(index, { value: e.target.value })} placeholder="Value" /><button type="button" onClick={() => setForm({ ...form, extraHeaders: form.extraHeaders.filter((_, i) => i !== index) })}>×</button></div>)}
       </div>

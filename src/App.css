@@ -106,6 +106,7 @@ tr:hover td { background: #131924; }.error-cell { max-width: 220px; overflow: hi
 .dialog { width: min(570px, calc(100vw - 50px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid #30394a; border-radius: 13px; padding: 20px; background: #111720; box-shadow: 0 28px 90px rgba(0,0,0,.55); }
 .dialog-header { display: flex; justify-content: space-between; margin-bottom: 17px; }.dialog-header h2 { margin: 0 0 5px; font-size: 17px; }.dialog-header p { margin: 0; color: #727e91; font-size: 9px; }.dialog-header > button { border: 0; background: transparent; color: #778397; font-size: 21px; }
 .dialog label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; }.dialog label span, .field-heading > span { color: #aab3c3; font-size: 10px; font-weight: 600; }.dialog label small { color: #606c80; font-size: 9px; }
+.model-field-label { display: flex; justify-content: space-between; align-items: center; }.model-field-label button { border: 0; background: transparent; color: #8491f5; padding: 0; font-size: 10px; }
 .dialog input { width: 100%; border: 1px solid #2b3444; border-radius: 7px; outline: none; color: #dfe5ee; background: #0c1118; padding: 9px 10px; font-size: 11px; }.dialog input:focus { border-color: #6170e6; box-shadow: 0 0 0 3px rgba(84, 101, 224, .1); }
 .form-error { margin-bottom: 13px; border: 1px solid rgba(218, 80, 91, .3); border-radius: 7px; padding: 9px; background: rgba(154, 45, 53, .12); color: #ff8d94; font-size: 10px; }
 .field-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }.field-heading button, .header-row button { border: 0; color: #8491f5; background: transparent; font-size: 10px; }
@@ -113,4 +114,3 @@ tr:hover td { background: #131924; }.error-cell { max-width: 220px; overflow: hi
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #242c39; margin-top: 19px; padding-top: 15px; }
 .empty { padding: 45px; color: #647084; text-align: center; font-size: 11px; }.empty.small { padding: 20px; }
 @media (max-width: 1000px) { .stats-grid { grid-template-columns: repeat(2, 1fr); }.content-grid { grid-template-columns: 1fr; }.main-content { padding-left: 25px; padding-right: 25px; } }
-

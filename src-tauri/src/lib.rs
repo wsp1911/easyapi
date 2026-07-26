@@ -97,6 +97,7 @@ pub fn run() {
             commands::list_request_logs,
             commands::get_codex_setup,
             commands::test_provider,
+            commands::list_provider_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EasyAPI");

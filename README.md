@@ -5,9 +5,10 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows 本地代理。Codex 始
 ## 当前功能
 
 - `POST /v1/responses` 和 `POST /responses` 透明转发
+- `GET /v1/models` 和 `GET /models` 透明转发
 - 请求体直接流式上传，不解析为完整 JSON，不设置应用层总大小限制
 - JSON 和 SSE 响应直接流式返回
-- 多 Provider 管理：名称、Base URL、API Key、测试模型、额外请求头
+- 多 Provider 管理：名称、Base URL、API Key、测试模型、额外请求头；可从已保存的 Provider 拉取模型列表
 - 手动原子切换 Provider
 - 已开始的请求继续使用原 Provider，新请求使用切换后的 Provider
 - 不自动重试，不自动故障转移
