@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock,
 };
 
@@ -9,12 +9,13 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::{
     models::{AppStatus, Provider, ProviderView, RequestLog},
-    storage::Database,
+    storage::{CaptureData, ContentCapture, Database},
 };
 
 const KEYRING_SERVICE: &str = "easyapi";
 const ACTIVE_PROVIDER_SETTING: &str = "active_provider_id";
 const LOCAL_TOKEN_SETTING: &str = "local_token";
+const CONTENT_CAPTURE_ENABLED_SETTING: &str = "content_capture_enabled";
 
 pub struct ProviderRuntime {
     pub provider: Provider,
@@ -208,6 +209,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub local_token: String,
     pub listen_address: String,
+    content_capture_enabled: AtomicBool,
 }
 
 impl AppState {
@@ -226,6 +228,8 @@ impl AppState {
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .map_err(|e| e.to_string())?;
+        let content_capture_enabled =
+            db.get_setting(CONTENT_CAPTURE_ENABLED_SETTING)?.as_deref() == Some("true");
         Ok(Arc::new(Self {
             db,
             providers,
@@ -233,12 +237,43 @@ impl AppState {
             http_client,
             local_token,
             listen_address,
+            content_capture_enabled: AtomicBool::new(content_capture_enabled),
         }))
     }
 
     pub fn record_log(&self, log: &RequestLog) {
         if let Err(error) = self.db.insert_request_log(log) {
             tracing::warn!(%error, "failed to persist request log");
+        }
+    }
+
+    pub fn content_capture_enabled(&self) -> bool {
+        self.content_capture_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_content_capture_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.db.set_setting(
+            CONTENT_CAPTURE_ENABLED_SETTING,
+            if enabled { "true" } else { "false" },
+        )?;
+        self.content_capture_enabled
+            .store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn start_content_capture(
+        &self,
+        request_id: &str,
+        request_content_type: Option<String>,
+    ) -> Result<Arc<ContentCapture>, String> {
+        self.db
+            .start_content_capture(request_id, request_content_type)
+            .map(Arc::new)
+    }
+
+    pub fn record_content_capture(&self, request_id: &str, data: &CaptureData) {
+        if let Err(error) = self.db.insert_request_capture(request_id, data) {
+            tracing::warn!(%error, request_id, "failed to persist request content capture");
         }
     }
 }

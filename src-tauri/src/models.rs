@@ -65,6 +65,27 @@ pub struct RequestLog {
     pub outcome: String,
     pub error: Option<String>,
     pub request_bytes: Option<u64>,
+    pub content_captured: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentCaptureStatus {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestCapture {
+    pub request_content_type: Option<String>,
+    pub response_content_type: Option<String>,
+    pub request_content: Option<String>,
+    pub response_content: Option<String>,
+    pub request_captured_bytes: i64,
+    pub response_captured_bytes: i64,
+    pub request_complete: bool,
+    pub response_complete: bool,
+    pub capture_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

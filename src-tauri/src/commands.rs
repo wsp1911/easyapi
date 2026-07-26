@@ -7,7 +7,10 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    models::{AppStatus, CodexSetup, ProviderInput, ProviderTestResult, ProviderView, RequestLog},
+    models::{
+        AppStatus, CodexSetup, ContentCaptureStatus, ProviderInput, ProviderTestResult,
+        ProviderView, RequestCapture, RequestLog,
+    },
     state::{delete_api_key, set_api_key, AppState},
 };
 
@@ -83,7 +86,36 @@ pub fn list_request_logs(
     state: State<'_, Arc<AppState>>,
     limit: Option<usize>,
 ) -> Result<Vec<RequestLog>, String> {
-    state.db.list_request_logs(limit.unwrap_or(100))
+    state.db.list_request_logs(limit)
+}
+
+#[tauri::command]
+pub fn get_content_capture_status(state: State<'_, Arc<AppState>>) -> ContentCaptureStatus {
+    ContentCaptureStatus {
+        enabled: state.content_capture_enabled(),
+    }
+}
+
+#[tauri::command]
+pub fn set_content_capture_enabled(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<ContentCaptureStatus, String> {
+    state.set_content_capture_enabled(enabled)?;
+    Ok(ContentCaptureStatus { enabled })
+}
+
+#[tauri::command]
+pub fn get_request_capture(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<RequestCapture, String> {
+    state.db.get_request_capture(&id)
+}
+
+#[tauri::command]
+pub fn clear_request_captures(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.db.clear_request_captures()
 }
 
 #[tauri::command]

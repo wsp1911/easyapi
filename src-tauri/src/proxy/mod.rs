@@ -17,7 +17,7 @@ use tokio::time::{timeout, Duration};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::{models::RequestLog, state::AppState};
+use crate::{models::RequestLog, state::AppState, storage::ContentCapture};
 
 const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -155,6 +155,19 @@ async fn proxy_responses(
     };
 
     let (parts, body) = request.into_parts();
+    if state.content_capture_enabled() {
+        let request_content_type = parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        match state.start_content_capture(&request_id, request_content_type) {
+            Ok(capture) => guard.set_content_capture(capture),
+            Err(error) => {
+                tracing::warn!(%error, request_id, "failed to start request content capture")
+            }
+        }
+    }
     let mut builder = state.http_client.post(provider.responses_url()).header(
         header::AUTHORIZATION,
         format!("Bearer {}", provider.api_key()),
@@ -170,15 +183,26 @@ async fn proxy_responses(
     }
 
     let mut incoming = body.into_data_stream();
+    let request_capture = guard.content_capture();
     let upload_stream = stream! {
         loop {
             match timeout(UPLOAD_IDLE_TIMEOUT, incoming.next()).await {
-                Ok(Some(Ok(bytes))) => yield Ok::<_, io::Error>(bytes),
+                Ok(Some(Ok(bytes))) => {
+                    if let Some(capture) = &request_capture {
+                        capture.write_request(&bytes);
+                    }
+                    yield Ok::<_, io::Error>(bytes);
+                }
                 Ok(Some(Err(error))) => {
                     yield Err(io::Error::other(error));
                     break;
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    if let Some(capture) = &request_capture {
+                        capture.mark_request_complete();
+                    }
+                    break;
+                }
                 Err(_) => {
                     yield Err(io::Error::new(io::ErrorKind::TimedOut, "request upload idle timeout"));
                     break;
@@ -205,6 +229,15 @@ async fn proxy_responses(
 
     let status = upstream.status();
     guard.set_status(status);
+    let response_capture = guard.content_capture();
+    if let Some(capture) = &response_capture {
+        let response_content_type = upstream
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        capture.set_response_content_type(response_content_type);
+    }
     let mut response_builder = Response::builder()
         .status(status)
         .header("x-easyapi-request-id", request_id);
@@ -220,7 +253,12 @@ async fn proxy_responses(
         let mut stream_error = None;
         while let Some(item) = upstream_stream.next().await {
             match item {
-                Ok(bytes) => yield Ok::<_, io::Error>(bytes),
+                Ok(bytes) => {
+                    if let Some(capture) = &response_capture {
+                        capture.write_response(&bytes);
+                    }
+                    yield Ok::<_, io::Error>(bytes);
+                }
                 Err(error) => {
                     let message = sanitized_reqwest_error(&error);
                     stream_error = Some(message.clone());
@@ -231,6 +269,9 @@ async fn proxy_responses(
             }
         }
         if stream_error.is_none() {
+            if let Some(capture) = &response_capture {
+                capture.mark_response_complete();
+            }
             guard.complete();
         }
     };
@@ -321,6 +362,7 @@ struct RequestGuard {
     outcome: String,
     error: Option<String>,
     request_bytes: Option<u64>,
+    content_capture: Option<Arc<ContentCapture>>,
 }
 
 impl RequestGuard {
@@ -345,6 +387,7 @@ impl RequestGuard {
             outcome: "cancelled".to_string(),
             error: None,
             request_bytes,
+            content_capture: None,
         }
     }
 
@@ -373,6 +416,14 @@ impl RequestGuard {
             self.outcome = "completed".to_string();
         }
     }
+
+    fn set_content_capture(&mut self, capture: Arc<ContentCapture>) {
+        self.content_capture = Some(capture);
+    }
+
+    fn content_capture(&self) -> Option<Arc<ContentCapture>> {
+        self.content_capture.clone()
+    }
 }
 
 impl Drop for RequestGuard {
@@ -389,7 +440,12 @@ impl Drop for RequestGuard {
             outcome: self.outcome.clone(),
             error,
             request_bytes: self.request_bytes,
+            content_captured: false,
         });
+        if let Some(capture) = self.content_capture.take() {
+            self.state
+                .record_content_capture(&self.id, &capture.finish());
+        }
     }
 }
 
@@ -456,6 +512,7 @@ mod tests {
         let db =
             Arc::new(crate::storage::Database::open(&temp.path().join("test.sqlite3")).unwrap());
         let state = crate::state::AppState::new(db, "127.0.0.1:8787".to_string()).unwrap();
+        state.set_content_capture_enabled(true).unwrap();
         state
             .providers
             .set_active_for_test(crate::state::ProviderRuntime::new_for_test(
@@ -481,12 +538,16 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"model":"test","input":"hello"}"#))
             .unwrap();
-        let response = router(state).oneshot(request).await.unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[header::CONTENT_TYPE],
             "text/event-stream"
         );
+        let request_id = response.headers()["x-easyapi-request-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
             bytes,
@@ -494,6 +555,17 @@ mod tests {
                 b"event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\n"
             )
         );
+        let capture = state.db.get_request_capture(&request_id).unwrap();
+        assert_eq!(
+            capture.request_content.as_deref(),
+            Some(r#"{"model":"test","input":"hello"}"#)
+        );
+        assert_eq!(
+            capture.response_content.as_deref(),
+            Some("event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\n")
+        );
+        assert!(capture.request_complete);
+        assert!(capture.response_complete);
     }
 
     #[tokio::test]

@@ -92,6 +92,7 @@ dt { color: #687489; } dd { margin: 0; color: #aeb7c7; }
 .info-box strong, .warning-box strong { font-size: 11px; }.info-box p, .warning-box p { margin: 6px 0 0; color: #7d899d; font-size: 10px; line-height: 1.6; }
 .warning-box { border-left-color: #d6a94c; background: rgba(92, 69, 24, .13); }
 .table-panel { overflow: auto; }
+.request-actions { display: flex; align-items: center; gap: 8px; }.capture-toggle { display: flex; align-items: center; gap: 7px; color: #aeb7c7; font-size: 10px; }.capture-toggle input { accent-color: #6372f5; width: 15px; height: 15px; }.content-button { border: 0; background: transparent; color: #8491f5; padding: 0; font-size: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 10px; }
 th { text-align: left; color: #6f7b90; background: #141a24; font-weight: 600; padding: 11px 13px; white-space: nowrap; }
 td { padding: 11px 13px; border-top: 1px solid #1e2531; color: #aeb7c6; white-space: nowrap; }
@@ -104,6 +105,7 @@ tr:hover td { background: #131924; }.error-cell { max-width: 220px; overflow: hi
 .code-block button { position: absolute; top: 8px; right: 8px; border: 1px solid #303a4c; border-radius: 5px; background: #171d27; color: #aeb7c7; padding: 5px 8px; font-size: 9px; }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(3, 5, 9, .72); backdrop-filter: blur(3px); }
 .dialog { width: min(570px, calc(100vw - 50px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid #30394a; border-radius: 13px; padding: 20px; background: #111720; box-shadow: 0 28px 90px rgba(0,0,0,.55); }
+.capture-dialog { width: min(960px, calc(100vw - 50px)); }.capture-section { margin-top: 16px; border: 1px solid #252e3d; border-radius: 8px; overflow: hidden; }.capture-section-header { display: flex; justify-content: space-between; gap: 14px; padding: 10px 12px; background: #151b26; }.capture-section h3 { margin: 0; font-size: 12px; }.capture-section-header span { color: #788397; font-size: 10px; }.capture-section pre { max-height: 280px; overflow: auto; margin: 0; padding: 13px; color: #c4ccda; background: #090c12; font: 10px/1.65 "JetBrains Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dialog-header { display: flex; justify-content: space-between; margin-bottom: 17px; }.dialog-header h2 { margin: 0 0 5px; font-size: 17px; }.dialog-header p { margin: 0; color: #727e91; font-size: 9px; }.dialog-header > button { border: 0; background: transparent; color: #778397; font-size: 21px; }
 .dialog label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 13px; }.dialog label span, .field-heading > span { color: #aab3c3; font-size: 10px; font-weight: 600; }.dialog label small { color: #606c80; font-size: 9px; }
 .model-field-label { display: flex; justify-content: space-between; align-items: center; }.model-field-label button { border: 0; background: transparent; color: #8491f5; padding: 0; font-size: 10px; }

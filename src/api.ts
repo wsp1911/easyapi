@@ -43,6 +43,23 @@ export type RequestLog = {
   outcome: string;
   error?: string;
   requestBytes?: number;
+  contentCaptured: boolean;
+};
+
+export type ContentCaptureStatus = {
+  enabled: boolean;
+};
+
+export type RequestCapture = {
+  requestContentType?: string;
+  responseContentType?: string;
+  requestContent?: string;
+  responseContent?: string;
+  requestCapturedBytes: number;
+  responseCapturedBytes: number;
+  requestComplete: boolean;
+  responseComplete: boolean;
+  captureError?: string;
 };
 
 export type ProviderTestResult = {
@@ -66,6 +83,10 @@ export const api = {
   testProvider: (id: string) => invoke<ProviderTestResult>("test_provider", { id }),
   listProviderModels: (id: string) => invoke<string[]>("list_provider_models", { id }),
   getStatus: () => invoke<AppStatus>("get_status"),
-  listLogs: (limit = 100) => invoke<RequestLog[]>("list_request_logs", { limit }),
+  listLogs: (limit?: number) => invoke<RequestLog[]>("list_request_logs", { limit }),
+  getContentCaptureStatus: () => invoke<ContentCaptureStatus>("get_content_capture_status"),
+  setContentCaptureEnabled: (enabled: boolean) => invoke<ContentCaptureStatus>("set_content_capture_enabled", { enabled }),
+  getRequestCapture: (id: string) => invoke<RequestCapture>("get_request_capture", { id }),
+  clearRequestCaptures: () => invoke<void>("clear_request_captures"),
   getCodexSetup: () => invoke<CodexSetup>("get_codex_setup"),
 };

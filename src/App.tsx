@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { api, AppStatus, CodexSetup, HeaderPair, Provider, ProviderInput, ProviderTestResult, RequestLog } from "./api";
+import { api, AppStatus, CodexSetup, ContentCaptureStatus, HeaderPair, Provider, ProviderInput, ProviderTestResult, RequestCapture, RequestLog } from "./api";
 import "./App.css";
 
 type Page = "overview" | "providers" | "requests" | "setup";
@@ -33,6 +33,7 @@ export default function App() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [status, setStatus] = useState<AppStatus>(emptyStatus);
   const [logs, setLogs] = useState<RequestLog[]>([]);
+  const [contentCapture, setContentCapture] = useState<ContentCaptureStatus>({ enabled: false });
   const [setup, setSetup] = useState<CodexSetup | null>(null);
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -40,12 +41,13 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextProviders, nextStatus, nextLogs] = await Promise.all([
-        api.listProviders(), api.getStatus(), api.listLogs(100),
+      const [nextProviders, nextStatus, nextLogs, nextContentCapture] = await Promise.all([
+        api.listProviders(), api.getStatus(), api.listLogs(), api.getContentCaptureStatus(),
       ]);
       setProviders(nextProviders);
       setStatus(nextStatus);
       setLogs(nextLogs);
+      setContentCapture(nextContentCapture);
     } catch (error) {
       setNotice(errorText(error));
     } finally {
@@ -85,6 +87,16 @@ export default function App() {
     }
   }
 
+  async function setContentCaptureEnabled(enabled: boolean) {
+    try {
+      const next = await api.setContentCaptureEnabled(enabled);
+      setContentCapture(next);
+      setNotice(next.enabled ? "已开始记录请求与响应内容" : "已停止记录新的请求与响应内容");
+    } catch (error) {
+      setNotice(errorText(error));
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -110,7 +122,7 @@ export default function App() {
           <>
             {page === "overview" && <Overview status={status} active={active} providers={providers} logs={logs} onSwitch={switchProvider} onManage={() => setPage("providers")} />}
             {page === "providers" && <ProvidersPage providers={providers} onAdd={() => setEditing("new")} onEdit={setEditing} onSwitch={switchProvider} onDelete={removeProvider} notify={setNotice} />}
-            {page === "requests" && <RequestsPage logs={logs} onRefresh={refresh} />}
+            {page === "requests" && <RequestsPage logs={logs} onRefresh={refresh} contentCapture={contentCapture} onCaptureEnabledChange={setContentCaptureEnabled} notify={setNotice} />}
             {page === "setup" && <SetupPage setup={setup} />}
           </>
         )}
@@ -222,16 +234,64 @@ function ProvidersPage({ providers, onAdd, onEdit, onSwitch, onDelete, notify }:
   </section>;
 }
 
-function RequestsPage({ logs, onRefresh }: { logs: RequestLog[]; onRefresh: () => Promise<void> }) {
+function RequestsPage({ logs, onRefresh, contentCapture, onCaptureEnabledChange, notify }: {
+  logs: RequestLog[]; onRefresh: () => Promise<void>; contentCapture: ContentCaptureStatus;
+  onCaptureEnabledChange: (enabled: boolean) => Promise<void>; notify: (value: string) => void;
+}) {
+  const [viewingCapture, setViewingCapture] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const hasCapturedContent = logs.some(log => log.contentCaptured);
+
+  async function clearCaptures() {
+    if (!window.confirm("确定清空所有已保存的请求和响应内容吗？请求元数据会保留。")) return;
+    setClearing(true);
+    try {
+      await api.clearRequestCaptures();
+      notify("已清空请求与响应内容记录");
+      await onRefresh();
+    } catch (error) {
+      notify(errorText(error));
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return <section>
-    <PageHeader title="请求记录" subtitle="仅保存状态、耗时和请求大小，不保存 Prompt、代码、响应内容或 API Key。" action={<button className="secondary" onClick={() => void onRefresh()}>刷新</button>} />
+    <PageHeader title="请求记录" subtitle={contentCapture.enabled ? "正在原样保存新的 Responses 请求和响应内容。" : "仅保存状态、耗时和请求大小；内容记录当前已关闭。"} action={<div className="request-actions"><label className="capture-toggle"><span>记录内容</span><input type="checkbox" checked={contentCapture.enabled} onChange={event => void onCaptureEnabledChange(event.target.checked)} /></label>{(contentCapture.enabled || hasCapturedContent) && <button className="secondary" disabled={clearing} onClick={() => void clearCaptures()}>{clearing ? "清空中…" : "清空内容"}</button>}<button className="secondary" onClick={() => void onRefresh()}>刷新</button></div>} />
     <div className="table-panel">
-      <table><thead><tr><th>时间</th><th>Provider</th><th>状态</th><th>结果</th><th>请求大小</th><th>耗时</th><th>错误</th></tr></thead>
-        <tbody>{logs.map(log => <tr key={log.id}><td>{formatTime(log.startedAt)}</td><td>{log.providerName ?? "—"}</td><td><span className={`http-status ${log.statusCode && log.statusCode < 400 ? "good" : "bad"}`}>{log.statusCode ?? "ERR"}</span></td><td>{outcomeLabel(log.outcome)}</td><td>{formatBytes(log.requestBytes)}</td><td>{log.durationMs} ms</td><td className="error-cell" title={log.error}>{log.error ?? "—"}</td></tr>)}</tbody>
+      <table><thead><tr><th>时间</th><th>Provider</th><th>状态</th><th>结果</th><th>请求大小</th><th>耗时</th><th>内容</th><th>错误</th></tr></thead>
+        <tbody>{logs.map(log => <tr key={log.id}><td>{formatTime(log.startedAt)}</td><td>{log.providerName ?? "—"}</td><td><span className={`http-status ${log.statusCode && log.statusCode < 400 ? "good" : "bad"}`}>{log.statusCode ?? "ERR"}</span></td><td>{outcomeLabel(log.outcome)}</td><td>{formatBytes(log.requestBytes)}</td><td>{log.durationMs} ms</td><td>{log.contentCaptured ? <button className="content-button" onClick={() => setViewingCapture(log.id)}>查看</button> : "—"}</td><td className="error-cell" title={log.error}>{log.error ?? "—"}</td></tr>)}</tbody>
       </table>
       {logs.length === 0 && <div className="empty">暂无请求记录</div>}
     </div>
+    {viewingCapture && <RequestCaptureDialog id={viewingCapture} onClose={() => setViewingCapture(null)} />}
   </section>;
+}
+
+function RequestCaptureDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const [capture, setCapture] = useState<RequestCapture | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.getRequestCapture(id).then(setCapture).catch(error => setError(errorText(error)));
+  }, [id]);
+
+  return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="dialog capture-dialog">
+      <div className="dialog-header"><div><h2>请求与响应内容</h2><p>{id}</p></div><button type="button" onClick={onClose}>×</button></div>
+      {error && <div className="form-error">{error}</div>}
+      {!capture && !error && <div className="empty small">正在读取内容记录…</div>}
+      {capture && <>
+        {capture.captureError && <div className="form-error">{capture.captureError}</div>}
+        <CaptureSection title="请求" contentType={capture.requestContentType} bytes={capture.requestCapturedBytes} complete={capture.requestComplete} content={capture.requestContent} />
+        <CaptureSection title="响应" contentType={capture.responseContentType} bytes={capture.responseCapturedBytes} complete={capture.responseComplete} content={capture.responseContent} />
+      </>}
+    </div>
+  </div>;
+}
+
+function CaptureSection({ title, contentType, bytes, complete, content }: { title: string; contentType?: string; bytes: number; complete: boolean; content?: string }) {
+  return <section className="capture-section"><div className="capture-section-header"><h3>{title}</h3><span>{contentType ?? "未知类型"} · {formatBytes(bytes)} · {complete ? "完整" : "未完整"}</span></div><pre>{content ?? "内容文件不可用"}</pre></section>;
 }
 
 function outcomeLabel(outcome: string) {
@@ -252,7 +312,7 @@ function SetupPage({ setup }: { setup: CodexSetup | null }) {
     <div className="setup-step"><span>1</span><div><h3>设置本地认证 Token</h3><p>在 PowerShell 中执行，然后重启一次 Codex 使用户环境变量生效。</p><CodeBlock value={setup.powershellCommand} copied={copied === "ps"} onCopy={() => void copy("ps", setup.powershellCommand)} /></div></div>
     <div className="setup-step"><span>2</span><div><h3>修改用户级 config.toml</h3><p>把下面配置加入 <code>~/.codex/config.toml</code>。模型名称仍由你现有的 Codex 配置决定。</p><CodeBlock value={setup.configToml} copied={copied === "toml"} onCopy={() => void copy("toml", setup.configToml)} /></div></div>
     <div className="setup-step"><span>3</span><div><h3>保持 EasyAPI 运行</h3><p>关闭窗口会隐藏到系统托盘，不会停止代理。需要完全关闭时使用托盘菜单中的“退出”。</p></div></div>
-    <div className="warning-box"><strong>请求体没有应用层大小限制</strong><p>Responses 请求体会直接流式转发，不读取成完整 JSON，也不会写入磁盘。仅有 60 秒上传空闲超时。</p></div>
+    <div className="warning-box"><strong>请求体没有应用层大小限制</strong><p>Responses 请求体会直接流式转发，不读取成完整 JSON。内容记录关闭时不会写入磁盘；仅有 60 秒上传空闲超时。</p></div>
   </section>;
 }
 

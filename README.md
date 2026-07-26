@@ -14,6 +14,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows 本地代理。Codex 始
 - 不自动重试，不自动故障转移
 - API Key 保存到 Windows Credential Manager
 - Provider 元数据和脱敏请求记录保存到 SQLite
+- 可选记录 Responses 请求和响应的原始内容，默认关闭
 - 本地代理 Bearer Token 验证
 - 系统托盘常驻；关闭窗口只会隐藏
 - 手动连接测试
@@ -24,7 +25,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows 本地代理。Codex 始
 - 自动故障转移
 - 自动切换 Key
 - 自动重放请求
-- 缓存或持久化 Prompt、源代码和响应正文
+- 在未开启内容记录时缓存或持久化 Prompt、源代码和响应正文
 - 修改请求中的模型名称
 - Chat Completions API
 - Responses WebSocket
@@ -135,6 +136,7 @@ Codex request body chunk
 - 上游连接超时 15 秒
 - 不设置整个 Responses 请求的总时长限制
 - SSE 响应收到后立即转发
+- 开启内容记录后，请求和响应会在转发时原样写入本地文件，不会在内存中累积完整内容
 
 ## 手动切换语义
 
@@ -208,13 +210,16 @@ SQLite 只保存：
 - 本地代理 Token
 - 请求状态、耗时、大小等脱敏元数据
 
-不会保存：
+开启“记录内容”后，应用还会保存：
+
+- Responses 请求和响应的原始字节内容
+- 内容类型、已保存字节数和传输是否完整
+
+内容文件位于 SQLite 数据库同级的 `captures` 目录。内容记录默认关闭；启用后不会设置大小或数量上限，直到你在请求记录页手动清空。
+
+无论是否开启内容记录，都不会保存：
 
 - 上游 API Key
-- Prompt
-- 源代码
-- Responses 请求正文
-- Responses 响应正文
 - Authorization Header
 
 ## 主要目录
