@@ -28,6 +28,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(proxy_models))
         .route("/responses", post(proxy_responses))
         .route("/v1/responses", post(proxy_responses))
+        .route("/responses/compact", post(proxy_responses_compact))
+        .route("/v1/responses/compact", post(proxy_responses_compact))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -118,6 +120,21 @@ async fn proxy_responses(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
 ) -> Response<Body> {
+    proxy_responses_endpoint(state, request, false).await
+}
+
+async fn proxy_responses_compact(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    proxy_responses_endpoint(state, request, true).await
+}
+
+async fn proxy_responses_endpoint(
+    state: Arc<AppState>,
+    request: Request<Body>,
+    compact: bool,
+) -> Response<Body> {
     let request_id = Uuid::new_v4().to_string();
     let started_at = Utc::now().to_rfc3339();
     let started = Instant::now();
@@ -168,7 +185,12 @@ async fn proxy_responses(
             }
         }
     }
-    let mut builder = state.http_client.post(provider.responses_url()).header(
+    let upstream_url = if compact {
+        provider.responses_compact_url()
+    } else {
+        provider.responses_url()
+    };
+    let mut builder = state.http_client.post(upstream_url).header(
         header::AUTHORIZATION,
         format!("Bearer {}", provider.api_key()),
     );
@@ -566,6 +588,88 @@ mod tests {
         );
         assert!(capture.request_complete);
         assert!(capture.response_complete);
+    }
+
+    #[tokio::test]
+    async fn forwards_compact_requests_to_the_upstream_compact_endpoint() {
+        use axum::{body::Bytes, routing::post, Router};
+        use http_body_util::BodyExt;
+        use tempfile::tempdir;
+        use tower::ServiceExt;
+
+        async fn upstream(request: Request<Body>) -> Response<Body> {
+            assert_eq!(
+                request.headers()[header::AUTHORIZATION],
+                "Bearer upstream-key"
+            );
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                body,
+                Bytes::from_static(
+                    br#"{"model":"test","input":[{"role":"user","content":"hello"}]}"#
+                )
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque"}]}"#,
+                ))
+                .unwrap()
+        }
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                upstream_listener,
+                Router::new().route("/v1/responses/compact", post(upstream)),
+            )
+            .await
+            .unwrap();
+        });
+
+        let temp = tempdir().unwrap();
+        let db =
+            Arc::new(crate::storage::Database::open(&temp.path().join("compact.sqlite3")).unwrap());
+        let state = crate::state::AppState::new(db, "127.0.0.1:8787".to_string()).unwrap();
+        state
+            .providers
+            .set_active_for_test(crate::state::ProviderRuntime::new_for_test(
+                crate::models::Provider {
+                    id: "compact-test".to_string(),
+                    name: "Compact Test".to_string(),
+                    base_url: format!("http://{upstream_address}/v1"),
+                    test_model: "test".to_string(),
+                    extra_headers: vec![],
+                    created_at: Utc::now().to_rfc3339(),
+                    updated_at: Utc::now().to_rfc3339(),
+                },
+                "upstream-key".to_string(),
+            ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/responses/compact")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", state.local_token),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"model":"test","input":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .unwrap();
+        let response = router(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            body,
+            Bytes::from_static(
+                br#"{"object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque"}]}"#,
+            )
+        );
     }
 
     #[tokio::test]

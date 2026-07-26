@@ -32,6 +32,13 @@ impl ProviderRuntime {
         format!("{}/responses", self.provider.base_url.trim_end_matches('/'))
     }
 
+    pub fn responses_compact_url(&self) -> String {
+        format!(
+            "{}/responses/compact",
+            self.provider.base_url.trim_end_matches('/')
+        )
+    }
+
     pub fn models_url(&self) -> String {
         format!("{}/models", self.provider.base_url.trim_end_matches('/'))
     }
