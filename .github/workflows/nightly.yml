@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: nightly-windows
+  group: nightly-desktop
   cancel-in-progress: false
 
 jobs:
@@ -98,20 +98,87 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  macos:
+    name: macOS Apple Silicon package
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target aarch64-apple-darwin
+
+      - name: Build macOS installer
+        run: pnpm exec tauri build --target aarch64-apple-darwin --bundles dmg
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: easyapi-macos-aarch64
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish nightly release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v7
+        with:
+          pattern: easyapi-*
+          path: installers
+          merge-multiple: true
+
       - name: Publish nightly release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          target_commitish: ${{ github.sha }}
           name: EasyAPI Nightly #${{ github.run_number }}
           prerelease: true
           make_latest: false
           body: |
-            Windows nightly build from `${{ github.sha }}`.
+            Windows and macOS nightly build from `${{ github.sha }}`.
 
             - NSIS setup executable
             - MSI installer
+            - macOS Apple Silicon (aarch64) DMG
+
+            macOS builds are unsigned and not notarized. See the README for first-launch instructions.
           files: |
-            src-tauri/target/release/bundle/nsis/*-setup.exe
-            src-tauri/target/release/bundle/msi/*.msi
+            installers/*-setup.exe
+            installers/*.msi
+            installers/*.dmg
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

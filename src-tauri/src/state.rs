@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 
 use arc_swap::ArcSwap;
@@ -10,7 +10,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::{
     codex_oauth::CodexOAuthManager,
-    models::{AppStatus, Provider, ProviderView, RequestLog},
+    models::{AppStatus, Provider, ProviderView, ProxySettings, RequestLog},
+    network::{HttpClients, MAX_CONNECT_TIMEOUT_SECONDS, MIN_CONNECT_TIMEOUT_SECONDS},
     storage::{CaptureData, ContentCapture, Database},
 };
 
@@ -19,9 +20,7 @@ const ACTIVE_PROVIDER_SETTING: &str = "active_provider_id";
 const LOCAL_TOKEN_SETTING: &str = "local_token";
 const CONTENT_CAPTURE_ENABLED_SETTING: &str = "content_capture_enabled";
 const UPSTREAM_CONNECT_TIMEOUT_SETTING: &str = "upstream_connect_timeout_seconds";
-pub const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 15;
-pub const MIN_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 1;
-pub const MAX_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 300;
+const PROXY_SETTINGS_SETTING: &str = "proxy_settings";
 
 pub struct ProviderRuntime {
     pub provider: Provider,
@@ -244,8 +243,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub providers: Arc<ProviderManager>,
     pub stats: Arc<RuntimeStats>,
-    http_client: ArcSwap<reqwest::Client>,
-    upstream_connect_timeout_seconds: AtomicU64,
+    http_clients: ArcSwap<HttpClients>,
+    network_update_lock: Mutex<()>,
     pub local_token: String,
     pub oauth: Arc<CodexOAuthManager>,
     pub listen_address: String,
@@ -267,23 +266,35 @@ impl AppState {
                 token
             }
         };
-        let upstream_connect_timeout_seconds = db
-            .get_setting(UPSTREAM_CONNECT_TIMEOUT_SETTING)?
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| {
-                (MIN_UPSTREAM_CONNECT_TIMEOUT_SECONDS..=MAX_UPSTREAM_CONNECT_TIMEOUT_SECONDS)
-                    .contains(value)
-            })
-            .unwrap_or(DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS);
-        let http_client = build_http_client(upstream_connect_timeout_seconds)?;
+        let settings = match db.get_setting(PROXY_SETTINGS_SETTING)? {
+            Some(value) => {
+                serde_json::from_str(&value).map_err(|_| "网络代理设置格式无效".to_string())?
+            }
+            None => {
+                let mut settings = ProxySettings::default();
+                if let Some(seconds) = db
+                    .get_setting(UPSTREAM_CONNECT_TIMEOUT_SETTING)?
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|seconds| {
+                        (MIN_CONNECT_TIMEOUT_SECONDS..=MAX_CONNECT_TIMEOUT_SECONDS)
+                            .contains(seconds)
+                    })
+                {
+                    settings.upstream_connect_timeout_seconds = seconds;
+                }
+                settings
+            }
+        };
+        let http_clients = HttpClients::new(settings, &listen_address)?;
+        oauth.set_http_client(http_clients.oauth.clone());
         let content_capture_enabled =
             db.get_setting(CONTENT_CAPTURE_ENABLED_SETTING)?.as_deref() == Some("true");
         Ok(Arc::new(Self {
             db,
             providers,
             stats: Arc::new(RuntimeStats::new()),
-            http_client: ArcSwap::from_pointee(http_client),
-            upstream_connect_timeout_seconds: AtomicU64::new(upstream_connect_timeout_seconds),
+            http_clients: ArcSwap::from_pointee(http_clients),
+            network_update_lock: Mutex::new(()),
             local_token,
             oauth,
             listen_address,
@@ -301,29 +312,27 @@ impl AppState {
         self.content_capture_enabled.load(Ordering::Relaxed)
     }
 
-    pub fn http_client(&self) -> reqwest::Client {
-        self.http_client.load_full().as_ref().clone()
+    pub fn http_client(&self, url: &str) -> reqwest::Client {
+        self.http_clients.load().client_for_url(url)
     }
 
-    pub fn upstream_connect_timeout_seconds(&self) -> u64 {
-        self.upstream_connect_timeout_seconds
-            .load(Ordering::Relaxed)
+    pub fn proxy_settings(&self) -> ProxySettings {
+        self.http_clients.load().settings.clone()
     }
 
     pub fn set_upstream_connect_timeout_seconds(&self, seconds: u64) -> Result<(), String> {
-        if !(MIN_UPSTREAM_CONNECT_TIMEOUT_SECONDS..=MAX_UPSTREAM_CONNECT_TIMEOUT_SECONDS)
-            .contains(&seconds)
-        {
-            return Err(format!(
-                "连接超时必须在 {MIN_UPSTREAM_CONNECT_TIMEOUT_SECONDS} 到 {MAX_UPSTREAM_CONNECT_TIMEOUT_SECONDS} 秒之间"
-            ));
-        }
-        let client = build_http_client(seconds)?;
-        self.db
-            .set_setting(UPSTREAM_CONNECT_TIMEOUT_SETTING, &seconds.to_string())?;
-        self.http_client.store(Arc::new(client));
-        self.upstream_connect_timeout_seconds
-            .store(seconds, Ordering::Relaxed);
+        let mut settings = self.proxy_settings();
+        settings.upstream_connect_timeout_seconds = seconds;
+        self.set_proxy_settings(settings)
+    }
+
+    pub fn set_proxy_settings(&self, settings: ProxySettings) -> Result<(), String> {
+        let _lock = self.network_update_lock.lock().map_err(|e| e.to_string())?;
+        let clients = HttpClients::new(settings, &self.listen_address)?;
+        let serialized = serde_json::to_string(&clients.settings).map_err(|e| e.to_string())?;
+        self.db.set_setting(PROXY_SETTINGS_SETTING, &serialized)?;
+        self.oauth.set_http_client(clients.oauth.clone());
+        self.http_clients.store(Arc::new(clients));
         Ok(())
     }
 
@@ -354,14 +363,6 @@ impl AppState {
     }
 }
 
-fn build_http_client(connect_timeout_seconds: u64) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(connect_timeout_seconds))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 impl ProviderRuntime {
     pub fn new_for_test(provider: Provider, api_key: String) -> Self {
@@ -385,6 +386,50 @@ impl ProviderManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_settings_migrate_persist_and_reject_invalid_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&temp.path().join("test.sqlite3")).unwrap());
+        db.set_setting(UPSTREAM_CONNECT_TIMEOUT_SETTING, "42")
+            .unwrap();
+        let oauth = || CodexOAuthManager::new(temp.path().join("oauth.json")).unwrap();
+        let state = AppState::new(db.clone(), "127.0.0.1:8787".to_string(), oauth()).unwrap();
+        assert_eq!(state.proxy_settings().upstream_connect_timeout_seconds, 42);
+        assert_eq!(
+            state.proxy_settings().proxy_mode,
+            crate::models::ProxyMode::System
+        );
+        let settings = ProxySettings {
+            upstream_connect_timeout_seconds: 30,
+            proxy_mode: crate::models::ProxyMode::Manual,
+            proxy_url: "socks5h://127.0.0.1:7897".to_string(),
+        };
+        state.set_proxy_settings(settings).unwrap();
+        let saved = state.proxy_settings();
+        let mut invalid = saved.clone();
+        invalid.proxy_url = "http://127.0.0.1:8787".to_string();
+        assert!(state.set_proxy_settings(invalid).is_err());
+        assert_eq!(state.proxy_settings(), saved);
+        let restored = AppState::new(db, "127.0.0.1:8787".to_string(), oauth()).unwrap();
+        assert_eq!(restored.proxy_settings(), saved);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn credentials_use_macos_keychain_backend() {
+        let entry = credential_entry("backend-check").unwrap();
+        assert!(entry.get_credential().is::<keyring::macos::MacCredential>());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn credentials_use_windows_native_backend() {
+        let entry = credential_entry("backend-check").unwrap();
+        assert!(entry
+            .get_credential()
+            .is::<keyring::windows::WinCredential>());
+    }
 
     fn oauth_provider() -> Provider {
         Provider {

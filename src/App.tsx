@@ -117,10 +117,10 @@ export default function App() {
     }
   }
 
-  async function setUpstreamConnectTimeoutSeconds(seconds: number) {
-    const next = await api.setUpstreamConnectTimeoutSeconds(seconds);
+  async function saveProxySettings(settings: ProxySettings) {
+    const next = await api.setProxySettings(settings);
     setProxySettings(next);
-    setNotice(`已将上游连接超时设置为 ${next.upstreamConnectTimeoutSeconds} 秒`);
+    setNotice("网络设置已保存，将应用到后续 API 和 OAuth 请求");
   }
 
   return (
@@ -153,7 +153,7 @@ export default function App() {
             {page === "requests" && <RequestsPage logs={logs} onRefresh={refresh} contentCapture={contentCapture} onCaptureEnabledChange={setContentCaptureEnabled} notify={setNotice} />}
             {page === "stats" && <StatisticsPage logs={logs} />}
             {page === "setup" && <SetupPage setup={setup} />}
-            {page === "settings" && <SettingsPage settings={proxySettings} onSave={setUpstreamConnectTimeoutSeconds} />}
+            {page === "settings" && <SettingsPage settings={proxySettings} onSave={saveProxySettings} />}
           </>
         )}
       </main>
@@ -458,14 +458,20 @@ function outcomeLabel(outcome: string) {
 
 function SettingsPage({ settings, onSave }: {
   settings: ProxySettings | null;
-  onSave: (seconds: number) => Promise<void>;
+  onSave: (settings: ProxySettings) => Promise<void>;
 }) {
   const [value, setValue] = useState("");
+  const [proxyMode, setProxyMode] = useState<ProxySettings["proxyMode"]>("system");
+  const [proxyUrl, setProxyUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (settings) setValue(String(settings.upstreamConnectTimeoutSeconds));
+    if (settings) {
+      setValue(String(settings.upstreamConnectTimeoutSeconds));
+      setProxyMode(settings.proxyMode);
+      setProxyUrl(settings.proxyUrl);
+    }
   }, [settings]);
 
   async function submit(event: FormEvent) {
@@ -475,10 +481,14 @@ function SettingsPage({ settings, onSave }: {
       setError("请输入 1 到 300 之间的整数秒数");
       return;
     }
+    if (proxyMode === "manual" && !proxyUrl.trim()) {
+      setError("请输入代理地址，例如 http://127.0.0.1:7897");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await onSave(seconds);
+      await onSave({ upstreamConnectTimeoutSeconds: seconds, proxyMode, proxyUrl: proxyUrl.trim() });
     } catch (saveError) {
       setError(errorText(saveError));
     } finally {
@@ -489,11 +499,17 @@ function SettingsPage({ settings, onSave }: {
   return <section>
     <PageHeader title="设置" subtitle="调整 EasyAPI 的本地代理行为。修改会立即应用到后续请求。" />
     <form className="settings-panel" onSubmit={submit}>
-      <div className="panel-title"><h3>上游连接超时</h3><p>仅限制建立上游连接的阶段，不限制 Responses 请求总时长或 SSE 读取时长。</p></div>
+      <div className="panel-title"><h3>上游网络</h3><p>用于 EasyAPI 连接上游 API、模型列表、生图、OAuth 登录和刷新。设置保存后立即生效，重启应用后保留。</p></div>
+      <div className="settings-field">
+        <label><span>代理方式</span><select value={proxyMode} onChange={event => setProxyMode(event.target.value as ProxySettings["proxyMode"])} disabled={!settings || saving}><option value="system">跟随系统代理</option><option value="direct">直连（不使用代理）</option><option value="manual">手动指定代理</option></select></label>
+        <small>{proxyMode === "system" ? "自动读取系统或应用进程的代理环境变量。更改系统代理后，请重新保存设置或重启 EasyAPI。" : proxyMode === "direct" ? "直接连接上游，忽略系统和环境变量中的代理。" : "填写代理软件提供的 HTTP / SOCKS 端口，例如 http://127.0.0.1:7897 或 socks5h://127.0.0.1:7897。请使用本机免认证端口。"}</small>
+      </div>
+      {proxyMode === "manual" && <div className="settings-field"><label><span>代理地址</span><input className="proxy-url-input" type="text" value={proxyUrl} onChange={event => setProxyUrl(event.target.value)} placeholder="http://127.0.0.1:7897" autoComplete="off" disabled={!settings || saving} /></label><small>不要填写 EasyAPI 的 8787 端口。Provider 的 Base URL 仍应填写模型服务的 API 地址。</small></div>}
       <div className="settings-field">
         <label><span>超时时间（秒）</span><input type="number" min="1" max="300" step="1" value={value} onChange={event => setValue(event.target.value)} disabled={!settings || saving} /></label>
-        <small>范围：1–300 秒，默认 15 秒。网络环境较慢时可尝试 30 秒。</small>
+        <small>范围：1–300 秒，默认 15 秒。仅限制建立上游连接，不限制 Responses 总时长或 SSE 读取时长。</small>
       </div>
+      <div className="settings-field"><small>访问 127.0.0.1、localhost、::1 等本机服务始终直连。Codex 访问 EasyAPI 的 127.0.0.1:8787 也应在代理软件中设置为绕过代理。</small></div>
       {error && <div className="form-error">{error}</div>}
       <div className="dialog-actions"><button className="primary" disabled={!settings || saving}>{saving ? "保存中…" : "保存设置"}</button></div>
     </form>
@@ -502,6 +518,16 @@ function SettingsPage({ settings, onSave }: {
 
 function SetupPage({ setup }: { setup: CodexSetup | null }) {
   const [copied, setCopied] = useState<string | null>(null);
+  const macProxyBypassCommand = 'export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"\nexport no_proxy="$NO_PROXY"\nlaunchctl setenv NO_PROXY "$NO_PROXY"\nlaunchctl setenv no_proxy "$NO_PROXY"';
+  const windowsProxyBypassCommand = `$easyapiNoProxy = @(
+  $env:NO_PROXY
+  [Environment]::GetEnvironmentVariable('NO_PROXY', 'User')
+  [Environment]::GetEnvironmentVariable('NO_PROXY', 'Machine')
+  '127.0.0.1,localhost,::1'
+) -join ','
+$easyapiNoProxy = ($easyapiNoProxy -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) -join ','
+[Environment]::SetEnvironmentVariable('NO_PROXY', $easyapiNoProxy, 'User')
+$env:NO_PROXY = $easyapiNoProxy`;
   async function copy(label: string, value: string) {
     await navigator.clipboard.writeText(value);
     setCopied(label);
@@ -509,11 +535,12 @@ function SetupPage({ setup }: { setup: CodexSetup | null }) {
   }
   if (!setup) return <div className="empty">正在加载配置…</div>;
   return <section>
-    <PageHeader title="Codex 配置" subtitle="只需配置一次，之后所有上游切换都在 EasyAPI 内完成。" />
-    <div className="setup-step"><span>1</span><div><h3>设置本地认证 Token</h3><p>在 PowerShell 中执行，然后重启一次 Codex 使用户环境变量生效。</p><CodeBlock value={setup.powershellCommand} copied={copied === "ps"} onCopy={() => void copy("ps", setup.powershellCommand)} /></div></div>
-    <div className="setup-step"><span>2</span><div><h3>修改用户级 config.toml</h3><p>把下面配置加入 <code>~/.codex/config.toml</code>。模型名称仍由你现有的 Codex 配置决定。<code>requires_openai_auth = false</code> 会继续使用上面的本地 Token；<code>x-openai-actor-authorization</code> 只用来注册内置生图工具，代理转发前会去掉它。保存后请彻底退出 Codex，再新建会话。</p><CodeBlock value={setup.configToml} copied={copied === "toml"} onCopy={() => void copy("toml", setup.configToml)} /></div></div>
-    <div className="setup-step"><span>3</span><div><h3>保持 EasyAPI 运行</h3><p>关闭窗口会隐藏到系统托盘，不会停止代理。需要完全关闭时使用托盘菜单中的“退出”。</p></div></div>
+    <PageHeader title="Codex 配置" subtitle="完成以下配置后，所有上游切换都在 EasyAPI 内完成。" />
+    <div className="setup-step"><span>1</span><div><h3>设置本地认证 Token</h3><p>{setup.platform === "macos" ? "在终端（zsh）中执行。命令会将 Token 写入 .zshrc，并设置当前登录会话的桌面应用环境变量；随后完全退出并重新打开 Codex。" : setup.platform === "windows" ? "在 PowerShell 中执行，然后重启一次 Codex 使用户环境变量生效。" : "在终端中执行，并从同一终端启动 Codex。"}</p>{setup.platform === "macos" && <p>重启 Mac 或重新登录后，终端启动的 Codex 会自动读取 Token；从 Dock 或 Finder 启动前，请再执行一次下面的命令。使用其他 Shell 时，请将 export 行加入对应的启动配置。</p>}<CodeBlock value={setup.environmentCommand} copied={copied === "env"} onCopy={() => void copy("env", setup.environmentCommand)} /></div></div>
+    <div className="setup-step"><span>2</span><div><h3>修改用户级 config.toml</h3><p>把下面配置加入 <code>~/.codex/config.toml</code>。模型名称仍由你现有的 Codex 配置决定。将 model_provider 放在文件顶层；已有 easyapi 配置时修改原配置，避免重复创建同名表。配置中的 <code>x-openai-actor-authorization</code> 用于让 Codex 注册内置生图工具，EasyAPI 转发前会将其移除。</p><CodeBlock value={setup.configToml} copied={copied === "toml"} onCopy={() => void copy("toml", setup.configToml)} /></div></div>
+    <div className="setup-step"><span>3</span><div><h3>保持 EasyAPI 运行</h3><p>{setup.platform === "macos" ? "关闭窗口后代理会继续运行。点击 Dock 图标或菜单栏图标中的“显示 EasyAPI”可重新打开窗口；使用菜单中的“退出”或 ⌘Q 完全退出。" : "关闭窗口会隐藏到系统托盘，不会停止代理。需要完全关闭时使用托盘菜单中的“退出”。"}</p></div></div>
     <div className="warning-box"><strong>请求体没有应用层大小限制</strong><p>Responses 请求体会直接流式转发，不读取成完整 JSON。内容记录关闭时不会写入磁盘；仅有 60 秒上传空闲超时。</p></div>
+    <div className="warning-box"><strong>遇到 502 时检查请求链路</strong><p>先查看 EasyAPI 的“请求记录”。有记录时检查上游服务和“设置 → 上游网络”；无记录时，先确认 Codex 连接的是 http://127.0.0.1:8787/v1，并让代理软件绕过 127.0.0.1 和 localhost。缺少本地 Token 通常返回 401。</p>{(setup.platform === "macos" || setup.platform === "windows") && <details className="setup-alternative"><summary>{setup.platform === "windows" ? "Windows" : "macOS"}：为新启动的 Codex 设置本机地址绕过代理</summary><p>{setup.platform === "windows" ? "在 PowerShell 中执行下方命令，再完全退出并重新打开 Codex。命令会保留现有的绕过地址，并将本机地址添加到用户级 NO_PROXY 环境变量，重启后仍然有效；从终端启动 Codex 时，请使用新的终端窗口或当前 PowerShell。" : "在终端执行下方命令，再完全退出并重新打开 Codex。这些环境变量对当前登录会话有效。"}如果代理软件使用 TUN / 透明代理模式，还需在该软件中将回环地址设为直连。</p><CodeBlock value={setup.platform === "windows" ? windowsProxyBypassCommand : macProxyBypassCommand} copied={copied === "bypass"} onCopy={() => void copy("bypass", setup.platform === "windows" ? windowsProxyBypassCommand : macProxyBypassCommand)} /></details>}</div>
   </section>;
 }
 
@@ -556,11 +583,11 @@ function ProviderDialog({ provider, onClose, onSaved }: { provider?: Provider; o
   }
   return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <form className="dialog" onSubmit={submit}>
-      <div className="dialog-header"><div><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>API Key 保存到 Windows Credential Manager；OAuth 凭据由 EasyAPI 单独保存。</p></div><button type="button" onClick={onClose}>×</button></div>
+      <div className="dialog-header"><div><h2>{provider ? "编辑 Provider" : "添加 Provider"}</h2><p>API Key 保存到系统凭据库（Windows 凭据管理器 / macOS 钥匙串）；OAuth 凭据由 EasyAPI 单独保存。</p></div><button type="button" onClick={onClose}>×</button></div>
       {error && <div className="form-error">{error}</div>}
       <label><span>名称</span><input autoFocus value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="例如 API-A" /></label>
       <label><span>认证方式</span><select value={form.authType} onChange={e => setForm({ ...form, authType: e.target.value as ProviderInput["authType"], baseUrl: e.target.value === "codex_oauth" ? "https://chatgpt.com/backend-api/codex" : form.baseUrl })}><option value="api_key">API Key</option><option value="codex_oauth">ChatGPT 官方订阅 OAuth</option></select></label>
-      <label><span>Base URL</span><input value={form.baseUrl} onChange={e => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" /><small>{form.authType === "codex_oauth" ? "官方 OAuth 固定使用 ChatGPT Codex backend。" : "EasyAPI 会在此地址后追加 /responses"}</small></label>
+      <label><span>Base URL</span><input value={form.baseUrl} onChange={e => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" /><small>{form.authType === "codex_oauth" ? "官方 OAuth 固定使用 ChatGPT Codex backend。" : "填写真正上游服务的 API 地址，EasyAPI 会追加 /responses。127.0.0.1:8787 是 EasyAPI 自己的入口，仅供 Codex 配置使用。"}</small></label>
       {form.authType === "api_key" && <label><span>{provider ? "替换 API Key（留空则不修改）" : "API Key"}</span><input type="password" value={form.apiKey} onChange={e => setForm({ ...form, apiKey: e.target.value })} placeholder={provider ? "保持现有 Key" : "sk-..."} autoComplete="off" /></label>}
       <label><span className="model-field-label">测试模型{provider && <button type="button" onClick={() => void loadModels()} disabled={loadingModels}>{loadingModels ? "获取中…" : "获取模型"}</button>}</span><input list="provider-models" value={form.testModel} onChange={e => setForm({ ...form, testModel: e.target.value })} placeholder="用于手动连接测试，可留空" />
         <datalist id="provider-models">{models.map(model => <option key={model} value={model} />)}</datalist>

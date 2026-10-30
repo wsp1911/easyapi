@@ -26,6 +26,11 @@ pub fn save_provider(
     mut input: ProviderInput,
 ) -> Result<ProviderView, String> {
     validate_provider_input(&mut input)?;
+    if crate::network::points_to_listener(&input.base_url, &state.listen_address) {
+        return Err(
+            "Provider 的 Base URL 不能指向 EasyAPI 自己，请填写真正上游 API 服务的地址".to_string(),
+        );
+    }
     let id = input
         .id
         .clone()
@@ -152,9 +157,16 @@ pub fn set_content_capture_enabled(
 
 #[tauri::command]
 pub fn get_proxy_settings(state: State<'_, Arc<AppState>>) -> ProxySettings {
-    ProxySettings {
-        upstream_connect_timeout_seconds: state.upstream_connect_timeout_seconds(),
-    }
+    state.proxy_settings()
+}
+
+#[tauri::command]
+pub fn set_proxy_settings(
+    state: State<'_, Arc<AppState>>,
+    settings: ProxySettings,
+) -> Result<ProxySettings, String> {
+    state.set_proxy_settings(settings)?;
+    Ok(state.proxy_settings())
 }
 
 #[tauri::command]
@@ -163,9 +175,7 @@ pub fn set_upstream_connect_timeout_seconds(
     seconds: u64,
 ) -> Result<ProxySettings, String> {
     state.set_upstream_connect_timeout_seconds(seconds)?;
-    Ok(ProxySettings {
-        upstream_connect_timeout_seconds: state.upstream_connect_timeout_seconds(),
-    })
+    Ok(state.proxy_settings())
 }
 
 #[tauri::command]
@@ -188,17 +198,75 @@ pub fn clear_request_logs(state: State<'_, Arc<AppState>>) -> Result<(), String>
 
 #[tauri::command]
 pub fn get_codex_setup(state: State<'_, Arc<AppState>>) -> CodexSetup {
-    let config_toml = codex_config_toml(&state.listen_address);
-    let escaped = state.local_token.clone();
-    let powershell_command = format!(
-        "[Environment]::SetEnvironmentVariable(\"EASYAPI_LOCAL_TOKEN\", \"{}\", \"User\")",
-        escaped
+    build_codex_setup(
+        &state.listen_address,
+        &state.local_token,
+        std::env::consts::OS,
+    )
+}
+
+fn build_codex_setup(listen_address: &str, local_token: &str, platform: &str) -> CodexSetup {
+    let config_toml = format!(
+        r#"model_provider = "easyapi"
+
+[model_providers.easyapi]
+name = "EasyAPI Local Proxy"
+base_url = "http://{}/v1"
+env_key = "EASYAPI_LOCAL_TOKEN"
+wire_api = "responses"
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+stream_idle_timeout_ms = 300000
+requires_openai_auth = false
+http_headers = {{ "x-openai-actor-authorization" = "easyapi" }}
+"#,
+        listen_address
     );
+    let environment_command = match platform {
+        "windows" => format!(
+            "[Environment]::SetEnvironmentVariable('EASYAPI_LOCAL_TOKEN', '{}', 'User')\n$env:EASYAPI_LOCAL_TOKEN = '{}'",
+            local_token.replace('\'', "''"),
+            local_token.replace('\'', "''"),
+        ),
+        "macos" => {
+            let export = format!("export EASYAPI_LOCAL_TOKEN={}", shell_quote(local_token));
+            let quoted_export = shell_quote(&export);
+            // zsh startup files configure CLI launches. launchctl also configures
+            // apps opened from Finder/Dock, for the current login session only.
+            format!(
+                r#"{export}
+easyapi_zshrc="${{ZDOTDIR:-$HOME}}/.zshrc"
+touch "$easyapi_zshrc"
+if ! grep -Fqx -- {quoted_export} "$easyapi_zshrc"; then
+  printf '\n%s\n' {quoted_export} >> "$easyapi_zshrc"
+fi
+launchctl setenv EASYAPI_LOCAL_TOKEN "$EASYAPI_LOCAL_TOKEN""#
+            )
+        }
+        _ => format!("export EASYAPI_LOCAL_TOKEN={}", shell_quote(local_token)),
+    };
+    let authorization =
+        serde_json::to_string(&format!("Bearer {local_token}")).expect("string serializes");
+    let config_toml_with_headers = config_toml
+        .replace("http_headers = { \"x-openai-actor-authorization\" = \"easyapi\" }\n", "")
+        .replace(
+            "env_key = \"EASYAPI_LOCAL_TOKEN\"",
+            &format!(
+                "http_headers = {{ Authorization = {authorization}, \"x-openai-actor-authorization\" = \"easyapi\" }}"
+            ),
+        );
     CodexSetup {
         config_toml,
-        powershell_command,
-        local_token: state.local_token.clone(),
+        config_toml_with_headers,
+        environment_command,
+        platform: platform.to_string(),
+        local_token: local_token.to_string(),
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[tauri::command]
@@ -231,7 +299,7 @@ pub async fn test_provider(
         request_body["max_output_tokens"] = serde_json::json!(16);
     }
     let mut request = state
-        .http_client()
+        .http_client(&provider.responses_url())
         .post(provider.responses_url())
         .bearer_auth(token)
         .json(&request_body);
@@ -296,7 +364,7 @@ pub async fn list_provider_models(
         (provider.api_key().to_string(), None)
     };
     let mut request = state
-        .http_client()
+        .http_client(&provider.models_url())
         .get(provider.models_url())
         .bearer_auth(token);
     for (name, value) in &provider.headers {
@@ -426,25 +494,6 @@ async fn read_response_preview(response: reqwest::Response, max_bytes: usize) ->
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn codex_config_toml(listen_address: &str) -> String {
-    format!(
-        r#"model_provider = "easyapi"
-
-[model_providers.easyapi]
-name = "EasyAPI Local Proxy"
-base_url = "http://{listen_address}/v1"
-env_key = "EASYAPI_LOCAL_TOKEN"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = false
-request_max_retries = 0
-stream_max_retries = 0
-stream_idle_timeout_ms = 300000
-http_headers = {{ "x-openai-actor-authorization" = "easyapi" }}
-"#
-    )
-}
-
 fn summarize_upstream_error(status: u16, body: &str) -> String {
     let message = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -462,6 +511,102 @@ fn summarize_upstream_error(status: u16, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_header_setup_is_available_on_both_platforms() {
+        for platform in ["windows", "macos"] {
+            let setup = build_codex_setup("127.0.0.1:8787", "local-token", platform);
+            assert!(setup
+                .config_toml
+                .contains("env_key = \"EASYAPI_LOCAL_TOKEN\""));
+            assert!(setup
+                .config_toml_with_headers
+                .contains("Authorization = \"Bearer local-token\""));
+            assert!(!setup.config_toml_with_headers.contains("env_key"));
+            assert!(setup
+                .config_toml_with_headers
+                .contains("base_url = \"http://127.0.0.1:8787/v1\""));
+            assert!(setup.config_toml.contains("requires_openai_auth = false"));
+            assert!(setup.config_toml.contains("x-openai-actor-authorization"));
+            assert!(setup
+                .config_toml_with_headers
+                .contains("x-openai-actor-authorization"));
+            assert_eq!(
+                setup
+                    .config_toml_with_headers
+                    .matches("http_headers =")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn generates_windows_setup_with_literal_token() {
+        let setup = build_codex_setup("127.0.0.1:8787", "token'$value", "windows");
+        assert_eq!(setup.platform, "windows");
+        assert!(setup
+            .config_toml
+            .contains("base_url = \"http://127.0.0.1:8787/v1\""));
+        assert!(setup
+            .config_toml
+            .contains("env_key = \"EASYAPI_LOCAL_TOKEN\""));
+        assert!(setup
+            .environment_command
+            .contains("'token''$value', 'User'"));
+        assert!(setup
+            .environment_command
+            .contains("$env:EASYAPI_LOCAL_TOKEN = 'token''$value'"));
+        assert!(!setup.environment_command.contains("launchctl"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_setup_preserves_zshrc_and_round_trips_token() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let zsh_dir = temp.path().join("shell config");
+        std::fs::create_dir(&zsh_dir).unwrap();
+        let zshrc = zsh_dir.join(".zshrc");
+        std::fs::write(&zshrc, "# Existing settings without a trailing newline").unwrap();
+        let token = "test token'\"$HOME`whoami`";
+        let setup = build_codex_setup("127.0.0.1:8787", token, "macos");
+        assert_eq!(setup.platform, "macos");
+        // Stub launchctl so the test never changes the user's login environment.
+        let script = format!(
+            "launchctl() {{ [[ $# = 3 && $1 = setenv && $2 = EASYAPI_LOCAL_TOKEN && $3 = $EXPECTED_TOKEN ]]; }}\n{}\n",
+            setup.environment_command,
+        );
+        for _ in 0..2 {
+            let output = Command::new("/bin/zsh")
+                .args(["-efc", &script])
+                .env("ZDOTDIR", &zsh_dir)
+                .env("EXPECTED_TOKEN", token)
+                .env_remove("EASYAPI_LOCAL_TOKEN")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let saved = std::fs::read_to_string(&zshrc).unwrap();
+        assert!(saved.starts_with("# Existing settings without a trailing newline\n"));
+        assert_eq!(saved.matches("export EASYAPI_LOCAL_TOKEN=").count(), 1);
+        let output = Command::new("/bin/zsh")
+            .args([
+                "-efc",
+                "source \"$ZDOTDIR/.zshrc\"; printf '%s' \"$EASYAPI_LOCAL_TOKEN\"",
+            ])
+            .env("ZDOTDIR", &zsh_dir)
+            .env_remove("EASYAPI_LOCAL_TOKEN")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), token);
+    }
 
     #[test]
     fn normalizes_provider_base_url() {
@@ -495,14 +640,5 @@ mod tests {
             auth_type: crate::models::AUTH_TYPE_API_KEY.to_string(),
         };
         assert!(validate_provider_input(&mut input).is_err());
-    }
-
-    #[test]
-    fn codex_config_enables_builtin_image_tool_without_replacing_local_auth() {
-        let config = codex_config_toml("127.0.0.1:8787");
-        assert!(config.contains("env_key = \"EASYAPI_LOCAL_TOKEN\""));
-        assert!(config.contains("requires_openai_auth = false"));
-        assert!(config.contains("x-openai-actor-authorization"));
-        assert!(config.contains("base_url = \"http://127.0.0.1:8787/v1\""));
     }
 }

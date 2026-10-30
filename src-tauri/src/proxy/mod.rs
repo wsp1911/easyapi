@@ -81,6 +81,12 @@ async fn proxy_models(
 
     let (parts, _) = request.into_parts();
     let mut url = provider.models_url();
+    if crate::network::points_to_listener(&url, &state.listen_address) {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"message": "Provider 的 Base URL 指向 EasyAPI 自己，请修改为真正上游 API 服务的地址", "type": "easyapi_configuration_error"}}),
+        );
+    }
     if let Some(query) = parts.uri.query() {
         url.push('?');
         url.push_str(query);
@@ -96,7 +102,7 @@ async fn proxy_models(
         }
     };
     let mut builder = state
-        .http_client()
+        .http_client(&url)
         .get(url)
         .header(header::AUTHORIZATION, format!("Bearer {token}"));
     for (name, value) in &parts.headers {
@@ -249,6 +255,14 @@ async fn proxy_post_endpoint(
     };
 
     let mut upstream_url = route.upstream_url(&provider);
+    if crate::network::points_to_listener(&upstream_url, &state.listen_address) {
+        let message = "Provider 的 Base URL 指向 EasyAPI 自己，请修改为真正上游 API 服务的地址";
+        guard.fail(StatusCode::SERVICE_UNAVAILABLE, message);
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"message": message, "type": "easyapi_configuration_error"}}),
+        );
+    }
     if let Some(query) = request.uri().query() {
         upstream_url.push('?');
         upstream_url.push_str(query);
@@ -289,7 +303,7 @@ async fn proxy_post_endpoint(
             );
         }
     };
-    let client = state.http_client();
+    let client = state.http_client(&upstream_url);
     let request_headers = parts.headers;
     let mut builder = build_responses_request(
         &client,
@@ -873,12 +887,16 @@ fn is_sse_prefix(bytes: &[u8]) -> bool {
 }
 
 fn should_forward_request_header(name: &HeaderName) -> bool {
-    let name = name.as_str().to_ascii_lowercase();
-    if name == "x-openai-actor-authorization" {
+    // Codex uses this local-only header to advertise its built-in image tool.
+    // It must never be sent to an upstream provider as an arbitrary user header.
+    if name
+        .as_str()
+        .eq_ignore_ascii_case("x-openai-actor-authorization")
+    {
         return false;
     }
     !matches!(
-        name.as_str(),
+        name.as_str().to_ascii_lowercase().as_str(),
         "authorization"
             | "host"
             | "connection"
@@ -922,9 +940,9 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> Response<Body>
 
 fn sanitized_reqwest_error(error: &reqwest::Error) -> String {
     if error.is_timeout() {
-        "上游请求超时".to_string()
+        "上游请求超时，请检查网络代理和连接超时设置".to_string()
     } else if error.is_connect() {
-        "无法连接上游 API".to_string()
+        "无法连接上游 API，请检查 Base URL、上游服务及设置中的网络代理地址和端口".to_string()
     } else if error.is_body() {
         "上游响应流中断".to_string()
     } else {
@@ -1522,6 +1540,63 @@ impl Drop for RequestGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_and_records_existing_provider_self_proxy_loop() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let temp = tempfile::tempdir().unwrap();
+        let db =
+            Arc::new(crate::storage::Database::open(&temp.path().join("loop.sqlite3")).unwrap());
+        let state = crate::state::AppState::new(
+            db,
+            "127.0.0.1:8787".to_string(),
+            crate::codex_oauth::CodexOAuthManager::new(temp.path().join("oauth.json")).unwrap(),
+        )
+        .unwrap();
+        state
+            .providers
+            .set_active_for_test(crate::state::ProviderRuntime::new_for_test(
+                crate::models::Provider {
+                    id: "loop".to_string(),
+                    name: "Loop".to_string(),
+                    base_url: "http://127.0.0.1:8787/v1".to_string(),
+                    test_model: String::new(),
+                    extra_headers: vec![],
+                    auth_type: crate::models::AUTH_TYPE_API_KEY.to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                },
+                "unused-key".to_string(),
+            ));
+        for (method, path) in [
+            ("POST", "/v1/responses"),
+            ("POST", "/v1/responses/compact"),
+            ("POST", "/v1/images/generations"),
+            ("POST", "/v1/images/edits"),
+            ("GET", "/v1/models"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", state.local_token),
+                )
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = router(state.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["type"], "easyapi_configuration_error");
+        }
+        let logs = state.db.list_request_logs(None).unwrap();
+        assert_eq!(logs.len(), 4);
+        assert!(logs
+            .iter()
+            .all(|log| log.error.as_deref().unwrap().contains("指向 EasyAPI 自己")));
+    }
 
     #[test]
     fn local_auth_requires_exact_bearer_token() {

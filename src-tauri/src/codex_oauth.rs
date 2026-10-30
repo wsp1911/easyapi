@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use reqwest::Client;
@@ -73,7 +74,7 @@ pub struct CodexOAuthManager {
     path: PathBuf,
     auth: RwLock<Option<StoredAuth>>,
     refresh_lock: Mutex<()>,
-    client: Client,
+    client: ArcSwap<Client>,
 }
 
 impl CodexOAuthManager {
@@ -95,8 +96,12 @@ impl CodexOAuthManager {
             path,
             auth: RwLock::new(stored),
             refresh_lock: Mutex::new(()),
-            client,
+            client: ArcSwap::from_pointee(client),
         }))
+    }
+
+    pub fn set_http_client(&self, client: Client) {
+        self.client.store(Arc::new(client));
     }
 
     pub async fn status(&self) -> OAuthStatus {
@@ -121,6 +126,7 @@ impl CodexOAuthManager {
     pub async fn start_device_flow(&self) -> Result<DeviceCode, String> {
         let response = self
             .client
+            .load()
             .post(DEVICE_USERCODE_URL)
             .header("Content-Type", "application/json")
             .header("User-Agent", "easyapi-codex-oauth")
@@ -152,6 +158,7 @@ impl CodexOAuthManager {
     ) -> Result<bool, String> {
         let response = self
             .client
+            .load()
             .post(DEVICE_TOKEN_URL)
             .header("Content-Type", "application/json")
             .header("User-Agent", "easyapi-codex-oauth")
@@ -211,6 +218,7 @@ impl CodexOAuthManager {
         }
         let token = self
             .client
+            .load()
             .post(OAUTH_TOKEN_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("User-Agent", "easyapi-codex-oauth")
@@ -262,6 +270,7 @@ impl CodexOAuthManager {
     async fn exchange_code(&self, code: &str, verifier: &str) -> Result<TokenResponse, String> {
         let response = self
             .client
+            .load()
             .post(OAUTH_TOKEN_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("User-Agent", "easyapi-codex-oauth")

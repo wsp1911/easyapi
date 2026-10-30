@@ -92,10 +92,23 @@ pub struct ContentCaptureStatus {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    #[default]
+    System,
+    Direct,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxySettings {
     pub upstream_connect_timeout_seconds: u64,
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
+    #[serde(default)]
+    pub proxy_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +138,8 @@ pub struct ProviderTestResult {
 #[serde(rename_all = "camelCase")]
 pub struct CodexSetup {
     pub config_toml: String,
-    pub powershell_command: String,
+    pub config_toml_with_headers: String,
+    pub environment_command: String,
+    pub platform: String,
     pub local_token: String,
 }
