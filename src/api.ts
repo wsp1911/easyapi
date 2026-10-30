@@ -64,6 +64,7 @@ export type ProxySettings = {
   upstreamConnectTimeoutSeconds: number;
   proxyMode: "system" | "direct" | "manual";
   proxyUrl: string;
+  capacityRetryCount: number;
 };
 
 export type RequestCapture = {

@@ -461,6 +461,7 @@ function SettingsPage({ settings, onSave }: {
   onSave: (settings: ProxySettings) => Promise<void>;
 }) {
   const [value, setValue] = useState("");
+  const [capacityRetryValue, setCapacityRetryValue] = useState("");
   const [proxyMode, setProxyMode] = useState<ProxySettings["proxyMode"]>("system");
   const [proxyUrl, setProxyUrl] = useState("");
   const [saving, setSaving] = useState(false);
@@ -469,6 +470,7 @@ function SettingsPage({ settings, onSave }: {
   useEffect(() => {
     if (settings) {
       setValue(String(settings.upstreamConnectTimeoutSeconds));
+      setCapacityRetryValue(String(settings.capacityRetryCount));
       setProxyMode(settings.proxyMode);
       setProxyUrl(settings.proxyUrl);
     }
@@ -481,6 +483,11 @@ function SettingsPage({ settings, onSave }: {
       setError("请输入 1 到 300 之间的整数秒数");
       return;
     }
+    const capacityRetryCount = Number(capacityRetryValue);
+    if (!Number.isInteger(capacityRetryCount) || capacityRetryCount < 0 || capacityRetryCount > 10) {
+      setError("请输入 0 到 10 之间的整数次数");
+      return;
+    }
     if (proxyMode === "manual" && !proxyUrl.trim()) {
       setError("请输入代理地址，例如 http://127.0.0.1:7897");
       return;
@@ -488,7 +495,7 @@ function SettingsPage({ settings, onSave }: {
     setSaving(true);
     setError(null);
     try {
-      await onSave({ upstreamConnectTimeoutSeconds: seconds, proxyMode, proxyUrl: proxyUrl.trim() });
+      await onSave({ upstreamConnectTimeoutSeconds: seconds, proxyMode, proxyUrl: proxyUrl.trim(), capacityRetryCount });
     } catch (saveError) {
       setError(errorText(saveError));
     } finally {
@@ -508,6 +515,10 @@ function SettingsPage({ settings, onSave }: {
       <div className="settings-field">
         <label><span>超时时间（秒）</span><input type="number" min="1" max="300" step="1" value={value} onChange={event => setValue(event.target.value)} disabled={!settings || saving} /></label>
         <small>范围：1–300 秒，默认 15 秒。仅限制建立上游连接，不限制 Responses 总时长或 SSE 读取时长。</small>
+      </div>
+      <div className="settings-field">
+        <label><span>容量限制重试次数</span><input type="number" min="0" max="10" step="1" value={capacityRetryValue} onChange={event => setCapacityRetryValue(event.target.value)} disabled={!settings || saving} /></label>
+        <small>上游返回容量不足时的自动重试次数，范围：0–10 次，默认 5 次。设置为 0 可关闭自动重试；超过第 5 次后继续使用 16 秒间隔。</small>
       </div>
       <div className="settings-field"><small>访问 127.0.0.1、localhost、::1 等本机服务始终直连。Codex 访问 EasyAPI 的 127.0.0.1:8787 也应在代理软件中设置为绕过代理。</small></div>
       {error && <div className="form-error">{error}</div>}

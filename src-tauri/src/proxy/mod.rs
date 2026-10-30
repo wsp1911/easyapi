@@ -33,6 +33,17 @@ const CAPACITY_RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(16),
 ];
 
+fn capacity_retry_delay(retry_count: u32) -> Duration {
+    CAPACITY_RETRY_DELAYS
+        .get(retry_count as usize)
+        .copied()
+        .unwrap_or_else(|| {
+            *CAPACITY_RETRY_DELAYS
+                .last()
+                .expect("retry delays are non-empty")
+        })
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -253,6 +264,9 @@ async fn proxy_post_endpoint(
             json!({"error": {"message": "No active provider is configured in EasyAPI", "type": "easyapi_configuration_error"}}),
         );
     };
+    // Keep one retry budget for the lifetime of this request. Settings changes
+    // should only affect requests that start afterwards.
+    let capacity_retry_count = state.proxy_settings().capacity_retry_count;
 
     let mut upstream_url = route.upstream_url(&provider);
     if crate::network::points_to_listener(&upstream_url, &state.listen_address) {
@@ -399,10 +413,7 @@ async fn proxy_post_endpoint(
         let is_capacity_error = is_server_overloaded_error(&response_body);
         let request_can_be_replayed =
             request_upload_complete.load(std::sync::atomic::Ordering::Acquire);
-        if retry_count >= CAPACITY_RETRY_DELAYS.len()
-            || !request_can_be_replayed
-            || !is_capacity_error
-        {
+        if retry_count >= capacity_retry_count || !request_can_be_replayed || !is_capacity_error {
             guard.set_status(response_status);
             let message = if is_capacity_error {
                 "上游模型容量暂不可用，自动重试次数已用尽"
@@ -441,7 +452,7 @@ async fn proxy_post_endpoint(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
             .map(|seconds| Duration::from_secs(seconds.min(30)))
-            .unwrap_or(CAPACITY_RETRY_DELAYS[retry_count]);
+            .unwrap_or_else(|| capacity_retry_delay(retry_count));
         retry_count += 1;
         guard.record_retry();
         tracing::warn!(request_id = %request_id, retry = retry_count, delay_ms = delay.as_millis(), "upstream model capacity reached; retrying request");
@@ -563,10 +574,10 @@ async fn proxy_post_endpoint(
             }
         }
         if should_retry
-            && sse_retry_count < CAPACITY_RETRY_DELAYS.len()
+            && sse_retry_count < capacity_retry_count
             && request_upload_complete.load(std::sync::atomic::Ordering::Acquire)
         {
-            let delay = CAPACITY_RETRY_DELAYS[sse_retry_count];
+            let delay = capacity_retry_delay(sse_retry_count);
             sse_retry_count += 1;
             guard.record_retry();
             tracing::warn!(request_id = %request_id, retry = sse_retry_count, delay_ms = delay.as_millis(), "SSE response reported model capacity; retrying request");
@@ -1831,6 +1842,13 @@ mod tests {
         assert!(!is_server_overloaded_error(
             br#"{"message":"server_is_overloaded"}"#
         ));
+    }
+
+    #[test]
+    fn capacity_retry_delay_reuses_last_backoff_after_fifth_retry() {
+        assert_eq!(capacity_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(capacity_retry_delay(4), Duration::from_secs(16));
+        assert_eq!(capacity_retry_delay(9), Duration::from_secs(16));
     }
 
     #[test]

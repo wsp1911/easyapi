@@ -109,6 +109,14 @@ pub struct ProxySettings {
     pub proxy_mode: ProxyMode,
     #[serde(default)]
     pub proxy_url: String,
+    #[serde(default = "default_capacity_retry_count")]
+    pub capacity_retry_count: u32,
+}
+
+pub const DEFAULT_CAPACITY_RETRY_COUNT: u32 = 5;
+
+fn default_capacity_retry_count() -> u32 {
+    DEFAULT_CAPACITY_RETRY_COUNT
 }
 
 #[derive(Debug, Clone, Serialize)]
