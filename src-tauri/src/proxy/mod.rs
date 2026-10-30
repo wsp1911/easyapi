@@ -666,6 +666,9 @@ async fn proxy_post_endpoint(
                         guard.mark_response_completed();
                     }
                     usage.observe(&bytes);
+                    if let Some(terminal_usage) = usage.terminal_usage() {
+                        guard.set_usage(terminal_usage);
+                    }
                     if let Some(capture) = &response_capture {
                         capture.write_response(&bytes);
                     }
@@ -1187,7 +1190,7 @@ impl RequestModelExtractor {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TokenUsage {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -1199,26 +1202,114 @@ struct TokenUsage {
 #[derive(Default)]
 struct TokenUsageExtractor {
     buffer: Vec<u8>,
+    sse_line_buffer: Vec<u8>,
+    sse_data_buffer: Vec<u8>,
     usage: TokenUsage,
+    terminal_event_seen: bool,
 }
 
 impl TokenUsageExtractor {
     fn observe(&mut self, bytes: &[u8]) {
         self.buffer.extend_from_slice(bytes);
-        if let Some(value) = find_json_number(&self.buffer, b"input_tokens") {
-            self.usage.input_tokens = Some(value);
+        self.sse_line_buffer.extend_from_slice(bytes);
+        let mut consumed = 0;
+        while let Some(relative_end) = self.sse_line_buffer[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + relative_end;
+            let line = self.sse_line_buffer[consumed..end].to_vec();
+            self.observe_sse_line(&line);
+            consumed = end + 1;
         }
-        if let Some(value) = find_json_number(&self.buffer, b"output_tokens") {
-            self.usage.output_tokens = Some(value);
+        if consumed > 0 {
+            self.sse_line_buffer.drain(..consumed);
         }
-        if let Some(value) = find_json_number(&self.buffer, b"total_tokens") {
-            self.usage.total_tokens = Some(value);
+        if self.terminal_event_seen {
+            return;
         }
-        if let Some(value) = find_json_number(&self.buffer, b"cached_tokens") {
-            self.usage.cached_input_tokens = Some(value);
+        self.scan_unstructured_usage();
+    }
+
+    fn observe_sse_line(&mut self, line: &[u8]) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            self.process_sse_data();
+            return;
         }
-        if let Some(value) = find_json_number(&self.buffer, b"reasoning_tokens") {
-            self.usage.reasoning_tokens = Some(value);
+        let Some(data) = line.strip_prefix(b"data:") else {
+            return;
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        if !self.sse_data_buffer.is_empty() {
+            self.sse_data_buffer.push(b'\n');
+        }
+        self.sse_data_buffer.extend_from_slice(data);
+    }
+
+    fn process_sse_data(&mut self) {
+        if self.sse_data_buffer.is_empty() {
+            return;
+        }
+        let data = std::mem::take(&mut self.sse_data_buffer);
+        let Ok(event) = serde_json::from_slice::<serde_json::Value>(&data) else {
+            return;
+        };
+        if !matches!(
+            event.get("type").and_then(serde_json::Value::as_str),
+            Some("response.completed" | "response.incomplete")
+        ) {
+            return;
+        }
+        self.terminal_event_seen = true;
+        self.usage = TokenUsage::default();
+        let Some(usage) = event
+            .get("response")
+            .and_then(|response| response.get("usage"))
+            .filter(|usage| !usage.is_null())
+        else {
+            return;
+        };
+        let Some(object) = usage.as_object() else {
+            return;
+        };
+        self.usage.input_tokens = object.get("input_tokens").and_then(json_i64);
+        self.usage.output_tokens = object.get("output_tokens").and_then(json_i64);
+        self.usage.total_tokens = object.get("total_tokens").and_then(json_i64);
+        self.usage.cached_input_tokens = object
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(json_i64);
+        self.usage.reasoning_tokens = object
+            .get("output_tokens_details")
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(json_i64);
+    }
+
+    fn scan_unstructured_usage(&mut self) {
+        let mut offset = 0;
+        while let Some(relative) = self.buffer[offset..]
+            .windows(7)
+            .position(|window| window == br#""usage""#)
+        {
+            let key_start = offset + relative;
+            let value_start = key_start + 7;
+            let mut cursor = value_start;
+            while cursor < self.buffer.len() && self.buffer[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= self.buffer.len() || self.buffer[cursor] != b':' {
+                offset = value_start;
+                continue;
+            }
+            cursor += 1;
+            while cursor < self.buffer.len() && self.buffer[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < self.buffer.len() && self.buffer[cursor] == b'{' {
+                scan_usage_fields(&self.buffer, cursor, &mut self.usage);
+            }
+            offset = value_start;
         }
         if self.buffer.len() > USAGE_SCAN_BUFFER_LIMIT {
             let keep_from = self.buffer.len() - USAGE_SCAN_BUFFER_LIMIT;
@@ -1227,9 +1318,129 @@ impl TokenUsageExtractor {
     }
 
     fn finish(mut self) -> TokenUsage {
-        self.observe(&[]);
+        if !self.sse_line_buffer.is_empty() && !self.terminal_event_seen {
+            let line = std::mem::take(&mut self.sse_line_buffer);
+            self.observe_sse_line(&line);
+        }
+        if !self.terminal_event_seen {
+            self.process_sse_data();
+        }
+        if !self.terminal_event_seen {
+            self.scan_unstructured_usage();
+        }
         self.usage
     }
+
+    fn terminal_usage(&self) -> Option<TokenUsage> {
+        self.terminal_event_seen.then(|| self.usage.clone())
+    }
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn scan_usage_fields(bytes: &[u8], start: usize, usage: &mut TokenUsage) {
+    for (key, depth, slot) in [
+        (b"input_tokens".as_slice(), 1, &mut usage.input_tokens),
+        (b"output_tokens".as_slice(), 1, &mut usage.output_tokens),
+        (b"total_tokens".as_slice(), 1, &mut usage.total_tokens),
+        (
+            b"cached_tokens".as_slice(),
+            2,
+            &mut usage.cached_input_tokens,
+        ),
+        (
+            b"reasoning_tokens".as_slice(),
+            2,
+            &mut usage.reasoning_tokens,
+        ),
+    ] {
+        if let Some(value) = find_usage_number(bytes, start, key, depth) {
+            *slot = Some(value);
+        }
+    }
+}
+
+fn find_usage_number(
+    bytes: &[u8],
+    start: usize,
+    wanted_key: &[u8],
+    wanted_depth: usize,
+) -> Option<i64> {
+    let mut depth = 0usize;
+    let mut cursor = start;
+    let mut result = None;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b'"' => {
+                let Some(end) = json_string_end(bytes, cursor) else {
+                    break;
+                };
+                let key = &bytes[cursor + 1..end];
+                cursor = end + 1;
+                if depth != wanted_depth || key != wanted_key {
+                    continue;
+                }
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() || bytes[cursor] != b':' {
+                    continue;
+                }
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor < bytes.len() && bytes[cursor] == b'"' {
+                    let Some(value_end) = json_string_end(bytes, cursor) else {
+                        break;
+                    };
+                    result = std::str::from_utf8(&bytes[cursor + 1..value_end])
+                        .ok()
+                        .and_then(|value| value.parse().ok());
+                    cursor = value_end + 1;
+                } else {
+                    let value_start = cursor;
+                    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                        cursor += 1;
+                    }
+                    if cursor > value_start && cursor < bytes.len() {
+                        result = std::str::from_utf8(&bytes[value_start..cursor])
+                            .ok()
+                            .and_then(|value| value.parse().ok());
+                    }
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    result
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, byte) in bytes[start + 1..].iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return Some(start + 1 + offset);
+        }
+    }
+    None
 }
 
 #[derive(Default)]
@@ -1797,6 +2008,62 @@ mod tests {
                 reasoning_tokens: Some(102),
             }
         );
+    }
+
+    #[test]
+    fn ignores_nested_token_counters_inside_usage_metadata() {
+        let mut extractor = TokenUsageExtractor::default();
+        extractor.observe(
+            br#"data: {"usage":{"input_tokens":63449,"output_tokens":216,"total_tokens":63665,"input_tokens_details":{"cached_tokens":63232},"output_tokens_details":{"reasoning_tokens":11},"attribution":{"items":{"tool":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}},"tool_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}"#,
+        );
+        assert_eq!(
+            extractor.finish(),
+            TokenUsage {
+                input_tokens: Some(63449),
+                output_tokens: Some(216),
+                total_tokens: Some(63665),
+                cached_input_tokens: Some(63232),
+                reasoning_tokens: Some(11),
+            }
+        );
+    }
+
+    #[test]
+    fn uses_usage_from_terminal_sse_event() {
+        let mut extractor = TokenUsageExtractor::default();
+        extractor.observe(
+            b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n",
+        );
+        extractor.observe(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":63449,\"output_tokens\":216,\"total_tokens\":63665,\"input_tokens_details\":{\"cached_tokens\":63232},\"output_tokens_details\":{\"reasoning_tokens\":11},\"tool_usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}}\n\n",
+        );
+        assert_eq!(
+            extractor.terminal_usage().map(|usage| usage.total_tokens),
+            Some(Some(63665))
+        );
+        assert_eq!(
+            extractor.finish(),
+            TokenUsage {
+                input_tokens: Some(63449),
+                output_tokens: Some(216),
+                total_tokens: Some(63665),
+                cached_input_tokens: Some(63232),
+                reasoning_tokens: Some(11),
+            }
+        );
+    }
+
+    #[test]
+    fn extracts_usage_when_metadata_exceeds_scan_buffer() {
+        let mut extractor = TokenUsageExtractor::default();
+        let mut response = br#"{"usage":{"input_tokens":63449,"output_tokens":216,"total_tokens":63665,"input_tokens_details":{"cached_tokens":63232},"output_tokens_details":{"reasoning_tokens":11},"attribution":{"items":{"tool":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"padding":"#
+            .to_vec();
+        response.extend(std::iter::repeat(b'x').take(USAGE_SCAN_BUFFER_LIMIT + 1024));
+        response.extend_from_slice(br#""}}}}}"#);
+        extractor.observe(&response);
+        let usage = extractor.finish();
+        assert_eq!(usage.input_tokens, Some(63449));
+        assert_eq!(usage.output_tokens, Some(216));
     }
 
     #[tokio::test]
