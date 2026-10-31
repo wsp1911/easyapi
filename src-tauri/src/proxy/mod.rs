@@ -16,7 +16,7 @@ use axum::{
 use chrono::Utc;
 use futures_util::{Stream, StreamExt};
 use reqwest::header::HeaderValue;
-use serde_json::json;
+use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
 use tokio::time::{timeout, Duration};
 use tower_http::trace::TraceLayer;
@@ -26,10 +26,10 @@ use crate::{models::RequestLog, state::AppState, storage::ContentCapture};
 
 const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CAPACITY_RETRY_DELAYS: [Duration; 5] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
     Duration::from_secs(4),
     Duration::from_secs(8),
+    Duration::from_secs(16),
+    Duration::from_secs(16),
     Duration::from_secs(16),
 ];
 
@@ -393,11 +393,14 @@ async fn proxy_post_endpoint(
             Ok(response) => response,
             Err(_) => break,
         };
-        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+        let response_status = response.status();
+        if !matches!(
+            response_status,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+        ) {
             upstream_result = Ok(response);
             break;
         }
-        let response_status = response.status();
         let response_headers = response.headers().clone();
         let response_body = match response.bytes().await {
             Ok(bytes) => bytes,
@@ -410,15 +413,24 @@ async fn proxy_post_endpoint(
                 );
             }
         };
-        let is_capacity_error = is_server_overloaded_error(&response_body);
+        let is_capacity_error = response_status == StatusCode::SERVICE_UNAVAILABLE
+            && is_server_overloaded_error(&response_body);
+        let is_rate_limit_error = is_retryable_rate_limit_error(response_status, &response_body);
+        let is_retryable_error = is_capacity_error || is_rate_limit_error;
         let request_can_be_replayed =
             request_upload_complete.load(std::sync::atomic::Ordering::Acquire);
-        if retry_count >= capacity_retry_count || !request_can_be_replayed || !is_capacity_error {
+        if retry_count >= capacity_retry_count || !request_can_be_replayed || !is_retryable_error {
             guard.set_status(response_status);
             let message = if is_capacity_error {
                 "上游模型容量暂不可用，自动重试次数已用尽"
+            } else if is_rate_limit_error {
+                "上游请求受到限流，自动重试次数已用尽"
             } else {
-                "上游返回 HTTP 503"
+                if response_status == StatusCode::TOO_MANY_REQUESTS {
+                    "上游返回 HTTP 429"
+                } else {
+                    "上游返回 HTTP 503"
+                }
             };
             guard.fail(response_status, message);
             let capture = guard.content_capture();
@@ -447,15 +459,16 @@ async fn proxy_post_endpoint(
                 )
             });
         }
-        let delay = response_headers
-            .get(header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| Duration::from_secs(seconds.min(30)))
+        let delay = retry_after_delay(&response_headers)
             .unwrap_or_else(|| capacity_retry_delay(retry_count));
         retry_count += 1;
         guard.record_retry();
-        tracing::warn!(request_id = %request_id, retry = retry_count, delay_ms = delay.as_millis(), "upstream model capacity reached; retrying request");
+        let retry_kind = if is_capacity_error {
+            "capacity"
+        } else {
+            "rate_limit"
+        };
+        tracing::warn!(request_id = %request_id, retry = retry_count, retry_kind, delay_ms = delay.as_millis(), "retryable upstream response; retrying request");
         tokio::time::sleep(delay).await;
         let chunks = replay_chunks
             .lock()
@@ -562,7 +575,7 @@ async fn proxy_post_endpoint(
                     }
                     scanner.observe(&bytes);
                     prefetched_chunks.push(bytes);
-                    if scanner.capacity_failed {
+                    if scanner.capacity_failed || scanner.rate_limit_failed {
                         should_retry = true;
                         break;
                     }
@@ -577,10 +590,17 @@ async fn proxy_post_endpoint(
             && sse_retry_count < capacity_retry_count
             && request_upload_complete.load(std::sync::atomic::Ordering::Acquire)
         {
-            let delay = capacity_retry_delay(sse_retry_count);
+            let delay = retry_after_delay(&response_headers)
+                .or(scanner.retry_delay)
+                .unwrap_or_else(|| capacity_retry_delay(sse_retry_count));
             sse_retry_count += 1;
             guard.record_retry();
-            tracing::warn!(request_id = %request_id, retry = sse_retry_count, delay_ms = delay.as_millis(), "SSE response reported model capacity; retrying request");
+            let retry_kind = if scanner.capacity_failed {
+                "capacity"
+            } else {
+                "rate_limit"
+            };
+            tracing::warn!(request_id = %request_id, retry = sse_retry_count, retry_kind, delay_ms = delay.as_millis(), "SSE response reported a retryable error; retrying request");
             tokio::time::sleep(delay).await;
             let chunks = replay_chunks
                 .lock()
@@ -617,8 +637,13 @@ async fn proxy_post_endpoint(
             prefetched_chunks.clear();
             continue;
         }
-        if scanner.capacity_failed {
-            tracing::error!(request_id = %request_id, status = response_status.as_u16(), retry_count = sse_retry_count, request_upload_complete = request_upload_complete.load(std::sync::atomic::Ordering::Acquire), output_started = scanner.output_started, "upstream SSE reported server_is_overloaded but request cannot be retried");
+        if scanner.capacity_failed || scanner.rate_limit_failed {
+            let retry_kind = if scanner.capacity_failed {
+                "capacity"
+            } else {
+                "rate_limit"
+            };
+            tracing::error!(request_id = %request_id, status = response_status.as_u16(), retry_count = sse_retry_count, retry_kind, request_upload_complete = request_upload_complete.load(std::sync::atomic::Ordering::Acquire), output_started = scanner.output_started, "upstream SSE reported a retryable error but request cannot be retried");
         }
         break (response_status, response_headers, stream);
     };
@@ -816,10 +841,98 @@ fn is_server_overloaded_error(body: &[u8]) -> bool {
         == Some("server_is_overloaded")
 }
 
+fn is_retryable_rate_limit_error(status: StatusCode, body: &[u8]) -> bool {
+    if !matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        return false;
+    }
+
+    let error = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("error").cloned());
+    let Some(error) = error else {
+        return status == StatusCode::TOO_MANY_REQUESTS;
+    };
+
+    let error_type = error.get("type").and_then(Value::as_str);
+    let code = error.get("code").and_then(Value::as_str);
+    if matches!(
+        error_type,
+        Some("usage_limit_reached" | "usage_not_included" | "insufficient_quota")
+    ) || matches!(
+        code,
+        Some(
+            "insufficient_quota"
+                | "credit_balance_exhausted"
+                | "organization_spend_limit_exceeded"
+                | "project_spend_limit_exceeded"
+                | "organization_usage_limit_exceeded"
+        )
+    ) {
+        return false;
+    }
+
+    matches!(error_type, Some("rate_limit_error"))
+        || matches!(code, Some("rate_limit_exceeded" | "slow_down"))
+        || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after_value)
+}
+
+fn parse_retry_after_value(value: &str) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| Duration::from_secs(seconds.min(30)))
+}
+
+fn parse_retry_delay_message(message: &str) -> Option<Duration> {
+    let message_lower = message.to_ascii_lowercase();
+    let start = message_lower.find("try again in")? + "try again in".len();
+    let rest = message_lower[start..].trim_start();
+    let number_end =
+        rest.find(|character: char| !character.is_ascii_digit() && character != '.')?;
+    let value = rest[..number_end].parse::<f64>().ok()?;
+    let unit = rest[number_end..].trim_start();
+    if unit.starts_with("ms") {
+        Some(Duration::from_millis(value as u64))
+    } else if unit.starts_with('s') || unit.starts_with("second") {
+        Duration::try_from_secs_f64(value).ok()
+    } else {
+        None
+    }
+}
+
+fn sse_retry_delay(value: &Value) -> Option<Duration> {
+    let error = value.pointer("/response/error")?;
+    if let Some(headers) = error.get("headers").and_then(Value::as_object) {
+        for (name, value) in headers {
+            if name.eq_ignore_ascii_case("retry-after") {
+                if let Some(value) = value.as_str().and_then(parse_retry_after_value) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .and_then(parse_retry_delay_message)
+}
+
 #[derive(Default)]
 struct CapacitySseScanner {
     pending: Vec<u8>,
     capacity_failed: bool,
+    rate_limit_failed: bool,
+    retry_delay: Option<Duration>,
     output_started: bool,
     completed: bool,
 }
@@ -831,7 +944,11 @@ impl CapacitySseScanner {
             let event = self.pending.drain(..event_end).collect::<Vec<_>>();
             self.pending.drain(..separator_len);
             self.inspect_event(&event);
-            if self.capacity_failed || self.output_started || self.completed {
+            if self.capacity_failed
+                || self.rate_limit_failed
+                || self.output_started
+                || self.completed
+            {
                 break;
             }
         }
@@ -860,14 +977,19 @@ impl CapacitySseScanner {
                     .and_then(|value| value.as_str())
             })
             .unwrap_or_default();
-        if event_name == "response.failed"
-            && parsed_data
+        if event_name == "response.failed" {
+            match parsed_data
                 .as_ref()
                 .and_then(|value| value.pointer("/response/error/code"))
                 .and_then(|code| code.as_str())
-                == Some("server_is_overloaded")
-        {
-            self.capacity_failed = true;
+            {
+                Some("server_is_overloaded") => self.capacity_failed = true,
+                Some("rate_limit_exceeded" | "slow_down") => {
+                    self.rate_limit_failed = true;
+                    self.retry_delay = parsed_data.as_ref().and_then(sse_retry_delay);
+                }
+                _ => {}
+            }
         } else if event_name == "response.completed" {
             self.completed = true;
         } else if event_name.starts_with("response.output")
@@ -1845,8 +1967,56 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_retryable_rate_limit_responses_without_retrying_quota_errors() {
+        assert!(is_retryable_rate_limit_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}"#,
+        ));
+        assert!(is_retryable_rate_limit_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"code":"slow_down"}}"#,
+        ));
+        assert!(is_retryable_rate_limit_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"message":"Too many requests"}}"#,
+        ));
+        assert!(is_retryable_rate_limit_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            br#"{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}"#,
+        ));
+        assert!(!is_retryable_rate_limit_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"type":"usage_limit_reached"}}"#,
+        ));
+        assert!(!is_retryable_rate_limit_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"code":"insufficient_quota"}}"#,
+        ));
+        assert!(!is_retryable_rate_limit_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"code":"rate_limit_exceeded"}}"#,
+        ));
+    }
+
+    #[test]
+    fn parses_retry_after_and_rate_limit_message_delays() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("31"));
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(30)));
+        assert_eq!(
+            parse_retry_delay_message("Please try again in 1.25s."),
+            Some(Duration::from_millis(1250))
+        );
+        assert_eq!(
+            parse_retry_delay_message("Try again in 28ms."),
+            Some(Duration::from_millis(28))
+        );
+        assert_eq!(parse_retry_delay_message("temporary failure"), None);
+    }
+
+    #[test]
     fn capacity_retry_delay_reuses_last_backoff_after_fifth_retry() {
-        assert_eq!(capacity_retry_delay(0), Duration::from_secs(1));
+        assert_eq!(capacity_retry_delay(0), Duration::from_secs(4));
         assert_eq!(capacity_retry_delay(4), Duration::from_secs(16));
         assert_eq!(capacity_retry_delay(9), Duration::from_secs(16));
     }
@@ -1856,10 +2026,31 @@ mod tests {
         let mut scanner = CapacitySseScanner::default();
         scanner.observe(b"event: response.created\ndata: {}\n\n");
         assert!(!scanner.capacity_failed);
+        assert!(!scanner.rate_limit_failed);
         assert!(!scanner.output_started);
         scanner.observe(b"data: {\"type\":\"response.failed\",\"sequence_number\":4,\"response\":{\"error\":{\"code\":\"server_is_overloaded\"}}}\n\n");
         assert!(scanner.capacity_failed);
+        assert!(!scanner.rate_limit_failed);
         assert!(!scanner.output_started);
+    }
+
+    #[test]
+    fn sse_rate_limit_failure_is_detected_before_output_is_exposed() {
+        let mut scanner = CapacitySseScanner::default();
+        scanner.observe(b"event: response.created\ndata: {}\n\n");
+        scanner.observe(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n");
+        assert!(!scanner.capacity_failed);
+        assert!(scanner.rate_limit_failed);
+        assert_eq!(scanner.retry_delay, None);
+        assert!(!scanner.output_started);
+    }
+
+    #[test]
+    fn sse_rate_limit_failure_preserves_server_retry_advice() {
+        let mut scanner = CapacitySseScanner::default();
+        scanner.observe(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Try again in 1.25s.\",\"headers\":{\"Retry-After\":\"2\"}}}}\n\n");
+        assert!(scanner.rate_limit_failed);
+        assert_eq!(scanner.retry_delay, Some(Duration::from_secs(2)));
     }
 
     #[test]
