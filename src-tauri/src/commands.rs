@@ -215,9 +215,6 @@ base_url = "http://{}/v1"
 env_key = "EASYAPI_LOCAL_TOKEN"
 wire_api = "responses"
 supports_websockets = false
-request_max_retries = 0
-stream_max_retries = 0
-stream_idle_timeout_ms = 300000
 requires_openai_auth = false
 http_headers = {{ "x-openai-actor-authorization" = "easyapi" }}
 "#,
@@ -551,6 +548,9 @@ mod tests {
         assert!(setup
             .config_toml
             .contains("env_key = \"EASYAPI_LOCAL_TOKEN\""));
+        assert!(!setup.config_toml.contains("request_max_retries"));
+        assert!(!setup.config_toml.contains("stream_max_retries"));
+        assert!(!setup.config_toml.contains("stream_idle_timeout_ms"));
         assert!(setup
             .environment_command
             .contains("'token''$value', 'User'"));
