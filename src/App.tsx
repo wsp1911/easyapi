@@ -506,6 +506,7 @@ function SettingsPage({ settings, theme, onThemeChange, onSave }: {
   onSave: (settings: ProxySettings) => Promise<void>;
 }) {
   const [value, setValue] = useState("15");
+  const [capacityRetryValue, setCapacityRetryValue] = useState("5");
   const [proxyMode, setProxyMode] = useState<ProxySettings["proxyMode"]>("system");
   const [proxyUrl, setProxyUrl] = useState("");
   const [saving, setSaving] = useState(false);
@@ -514,6 +515,7 @@ function SettingsPage({ settings, theme, onThemeChange, onSave }: {
   useEffect(() => {
     if (settings) {
       setValue(String(settings.upstreamConnectTimeoutSeconds));
+      setCapacityRetryValue(String(settings.capacityRetryCount));
       setProxyMode(settings.proxyMode);
       setProxyUrl(settings.proxyUrl);
     }
@@ -526,6 +528,11 @@ function SettingsPage({ settings, theme, onThemeChange, onSave }: {
       setError("请输入 1 到 300 之间的整数秒数");
       return;
     }
+    const capacityRetryCount = Number(capacityRetryValue);
+    if (!Number.isInteger(capacityRetryCount) || capacityRetryCount < 0 || capacityRetryCount > 10) {
+      setError("请输入 0 到 10 之间的整数次数");
+      return;
+    }
     if (proxyMode === "manual" && !proxyUrl.trim()) {
       setError("请输入代理地址，例如 http://127.0.0.1:7897");
       return;
@@ -533,7 +540,7 @@ function SettingsPage({ settings, theme, onThemeChange, onSave }: {
     setSaving(true);
     setError(null);
     try {
-      await onSave({ upstreamConnectTimeoutSeconds: seconds, proxyMode, proxyUrl: proxyUrl.trim() });
+      await onSave({ upstreamConnectTimeoutSeconds: seconds, proxyMode, proxyUrl: proxyUrl.trim(), capacityRetryCount });
     } catch (saveError) {
       setError(errorText(saveError));
     } finally {
@@ -552,6 +559,7 @@ function SettingsPage({ settings, theme, onThemeChange, onSave }: {
           <FieldRow><Field orientation="horizontal" label="代理方式" description={proxyMode === "system" ? "读取系统或进程的代理环境变量。更改系统代理后需重新保存或重启。" : proxyMode === "direct" ? "直接连接上游，忽略系统代理。" : "使用 HTTP / HTTPS / SOCKS 代理软件提供的本机免认证端口。"} controlWidth="auto"><Select aria-label="代理方式" value={proxyMode} onValueChange={next => setProxyMode(next as ProxySettings["proxyMode"])} disabled={!settings || saving} options={[{ value: "system", label: "跟随系统代理" }, { value: "direct", label: "直连" }, { value: "manual", label: "手动指定" }]} /></Field></FieldRow>
           {proxyMode === "manual" && <FieldRow><Field orientation="horizontal" label="代理地址" description="不要填写 EasyAPI 自己的 8787 端口。" controlWidth="auto"><Input aria-label="代理地址" value={proxyUrl} onValueChange={setProxyUrl} placeholder="http://127.0.0.1:7897" autoComplete="off" disabled={!settings || saving} /></Field></FieldRow>}
           <FieldRow><Field orientation="horizontal" label="连接超时" description="仅限制连接建立时间，不限制流式响应时长。范围 1–300 秒。" controlWidth="auto"><NumberInput aria-label="连接超时" value={Number(value)} decrementLabel="减少超时秒数" incrementLabel="增加超时秒数" onValueChange={next => setValue(String(next))} min={1} max={300} step={1} unit="秒" disabled={!settings || saving} /></Field></FieldRow>
+          <FieldRow><Field orientation="horizontal" label="容量限制重试次数" description="上游返回容量不足时自动重试，范围 0–10 次，默认 5 次。0 表示关闭；第 5 次后继续使用 16 秒间隔。" controlWidth="auto"><NumberInput aria-label="容量限制重试次数" value={Number(capacityRetryValue)} decrementLabel="减少重试次数" incrementLabel="增加重试次数" onValueChange={next => setCapacityRetryValue(String(next))} min={0} max={10} step={1} unit="次" disabled={!settings || saving} /></Field></FieldRow>
         </FieldGroup>
         <p className="page-note"><Icon name="info" size="xs" />127.0.0.1、localhost 和 ::1 等本机服务始终直连。</p>
       </FormSection>

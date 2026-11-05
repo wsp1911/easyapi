@@ -2,11 +2,13 @@ use std::{net::IpAddr, time::Duration};
 
 use reqwest::{Client, ClientBuilder, Proxy, Url};
 
-use crate::models::{ProxyMode, ProxySettings};
+use crate::models::{ProxyMode, ProxySettings, DEFAULT_CAPACITY_RETRY_COUNT};
 
 pub const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 15;
 pub const MIN_CONNECT_TIMEOUT_SECONDS: u64 = 1;
 pub const MAX_CONNECT_TIMEOUT_SECONDS: u64 = 300;
+pub const MIN_CAPACITY_RETRY_COUNT: u32 = 0;
+pub const MAX_CAPACITY_RETRY_COUNT: u32 = 10;
 
 impl Default for ProxySettings {
     fn default() -> Self {
@@ -14,6 +16,7 @@ impl Default for ProxySettings {
             upstream_connect_timeout_seconds: DEFAULT_CONNECT_TIMEOUT_SECONDS,
             proxy_mode: ProxyMode::System,
             proxy_url: String::new(),
+            capacity_retry_count: DEFAULT_CAPACITY_RETRY_COUNT,
         }
     }
 }
@@ -110,6 +113,13 @@ fn validate_settings(settings: &mut ProxySettings, listen_address: &str) -> Resu
             "连接超时必须在 {MIN_CONNECT_TIMEOUT_SECONDS} 到 {MAX_CONNECT_TIMEOUT_SECONDS} 秒之间"
         ));
     }
+    if !(MIN_CAPACITY_RETRY_COUNT..=MAX_CAPACITY_RETRY_COUNT)
+        .contains(&settings.capacity_retry_count)
+    {
+        return Err(format!(
+            "容量限制重试次数必须在 {MIN_CAPACITY_RETRY_COUNT} 到 {MAX_CAPACITY_RETRY_COUNT} 次之间"
+        ));
+    }
     if settings.proxy_mode != ProxyMode::Manual {
         settings.proxy_url.clear();
         return Ok(());
@@ -168,6 +178,23 @@ mod tests {
                 "{proxy_url}"
             );
         }
+    }
+
+    #[test]
+    fn validates_capacity_retry_count_range() {
+        assert_eq!(ProxySettings::default().capacity_retry_count, 5);
+        for capacity_retry_count in [MIN_CAPACITY_RETRY_COUNT, MAX_CAPACITY_RETRY_COUNT] {
+            let mut settings = ProxySettings {
+                capacity_retry_count,
+                ..Default::default()
+            };
+            assert!(validate_settings(&mut settings, "127.0.0.1:8787").is_ok());
+        }
+        let mut settings = ProxySettings {
+            capacity_retry_count: MAX_CAPACITY_RETRY_COUNT + 1,
+            ..Default::default()
+        };
+        assert!(validate_settings(&mut settings, "127.0.0.1:8787").is_err());
     }
 
     #[test]
@@ -305,6 +332,7 @@ mod tests {
                 proxy_mode: ProxyMode::Manual,
                 proxy_url: format!("socks5h://{address}"),
                 upstream_connect_timeout_seconds: 2,
+                ..Default::default()
             },
             "127.0.0.1:8787",
         )

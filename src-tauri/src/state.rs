@@ -404,6 +404,7 @@ mod tests {
             upstream_connect_timeout_seconds: 30,
             proxy_mode: crate::models::ProxyMode::Manual,
             proxy_url: "socks5h://127.0.0.1:7897".to_string(),
+            capacity_retry_count: 2,
         };
         state.set_proxy_settings(settings).unwrap();
         let saved = state.proxy_settings();
@@ -413,6 +414,23 @@ mod tests {
         assert_eq!(state.proxy_settings(), saved);
         let restored = AppState::new(db, "127.0.0.1:8787".to_string(), oauth()).unwrap();
         assert_eq!(restored.proxy_settings(), saved);
+    }
+
+    #[test]
+    fn missing_capacity_retry_count_in_saved_settings_uses_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&temp.path().join("test.sqlite3")).unwrap());
+        db.set_setting(
+            PROXY_SETTINGS_SETTING,
+            r#"{"upstreamConnectTimeoutSeconds":42,"proxyMode":"system","proxyUrl":""}"#,
+        )
+        .unwrap();
+        let oauth = CodexOAuthManager::new(temp.path().join("oauth.json")).unwrap();
+        let state = AppState::new(db, "127.0.0.1:8787".to_string(), oauth).unwrap();
+        assert_eq!(
+            state.proxy_settings().capacity_retry_count,
+            crate::models::DEFAULT_CAPACITY_RETRY_COUNT
+        );
     }
 
     #[cfg(target_os = "macos")]
