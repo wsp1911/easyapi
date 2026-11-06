@@ -107,3 +107,15 @@ tbody tr:hover { background: var(--openbitfun-color-action-quiet-hover); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
 .connection-path { margin: 0; overflow-wrap: anywhere; }
+.request-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 16px; border: 1px solid var(--openbitfun-color-border-subtle); border-radius: var(--openbitfun-radius-base); }
+.request-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--openbitfun-color-content-muted); }
+.request-selection-actions strong { color: var(--openbitfun-color-content-primary); }
+.request-export-options { width: 100%; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; color: var(--openbitfun-color-content-muted); font-size: 11px; }
+.request-select-cell { width: 44px; text-align: center; }
+.request-table-panel tr.selected { background: var(--openbitfun-color-action-quiet-hover); }
+.request-table-panel .request-model-cell { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.request-row-actions { display: flex; gap: 8px; }
+.capture-section-header { flex-wrap: wrap; }
+.capture-section-meta { display: flex; flex-direction: column; gap: 5px; }
+.capture-section-meta > span { color: var(--openbitfun-color-content-muted); font-size: 11px; }
+.capture-message { overflow-wrap: anywhere; margin-bottom: 16px; }

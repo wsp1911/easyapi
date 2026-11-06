@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BarChart3, Boxes, Home, List, Moon, Settings2, Sun, Terminal } from "lucide-react";
 import {
-  ActionItem, Alert, Avatar, Button, ConfirmDialog,
+  ActionItem, Alert, Avatar, Button, Checkbox, ConfirmDialog,
   DesignSystemProvider, Dialog, DialogBody, DialogClose, DialogDescription, DialogFooter,
   DialogHeader, DialogHeading, DialogTitle, Disclosure, Empty, Field, FieldGroup,
   FieldRow, FormSection, Icon, IconButton, Input, LoadingState,
@@ -14,6 +14,7 @@ import {
 } from "@openbitfun/ui";
 import { themes } from "@openbitfun/theme-openbitfun";
 import { api, AppStatus, CodexSetup, CodexConnectionMode, CodexConnectionStatus, CodexSwitchResult, ContentCaptureStatus, HeaderPair, Provider, ProviderInput, ProviderTestResult, ProxySettings, RequestCapture, RequestLog, OAuthStatus } from "./api";
+import { collectExportRecords, recordsToCsv, recordsToJson } from "./requestExport";
 import "./App.css";
 
 type Page = "overview" | "providers" | "requests" | "stats" | "setup" | "settings";
@@ -487,7 +488,48 @@ function RequestsPage({ logs, onRefresh, contentCapture, onCaptureEnabledChange,
   const [confirmClear, setConfirmClear] = useState<"contents" | "logs" | null>(null);
   const [clearing, setClearing] = useState(false);
   const [clearingLogs, setClearingLogs] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [includeContent, setIncludeContent] = useState(true);
+  const [working, setWorking] = useState<"copy" | "json" | "csv" | null>(null);
   const hasCapturedContent = logs.some(log => log.contentCaptured);
+  const selectedLogs = logs.filter(log => selectedIds.has(log.id));
+  const allSelected = logs.length > 0 && selectedLogs.length === logs.length;
+
+  useEffect(() => {
+    const availableIds = new Set(logs.map(log => log.id));
+    setSelectedIds(current => new Set([...current].filter(id => availableIds.has(id))));
+    setViewingCapture(current => current && availableIds.has(current) ? current : null);
+  }, [logs]);
+
+  function toggleSelection(id: string) {
+    setSelectedIds(current => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function transferRecords(action: "copy" | "json" | "csv", records: RequestLog[]) {
+    setWorking(action);
+    try {
+      const data = await collectExportRecords(records, action !== "csv" && includeContent, api.getRequestCapture);
+      const content = action === "csv" ? recordsToCsv(data) : recordsToJson(data);
+      const failures = data.filter(record => record.captureReadError).length;
+      const suffix = failures ? `（${failures} 条正文读取失败，详情已写入 captureReadError）` : "";
+      if (action === "copy") {
+        await api.copyRequestContent(content);
+        notify(`已复制 ${records.length} 条请求记录${suffix}`);
+      } else {
+        const path = await api.saveRequestExport(content, action);
+        if (path) notify(`已导出 ${records.length} 条请求记录至 ${path}${suffix}`);
+      }
+    } catch (error) {
+      notify(errorText(error));
+    } finally {
+      setWorking(null);
+    }
+  }
 
   async function clearCaptures() {
     setClearing(true);
@@ -507,6 +549,7 @@ function RequestsPage({ logs, onRefresh, contentCapture, onCaptureEnabledChange,
     try {
       await api.clearRequestLogs();
       setViewingCapture(null);
+      setSelectedIds(new Set());
       notify("已删除全部请求记录");
       await onRefresh();
     } catch (error) {
@@ -516,45 +559,125 @@ function RequestsPage({ logs, onRefresh, contentCapture, onCaptureEnabledChange,
     }
   }
 
-  const busy = clearing || clearingLogs;
+  const busy = clearing || clearingLogs || working !== null;
+  const exportLogs = selectedLogs.length > 0 ? selectedLogs : logs;
+  const exportScope = selectedLogs.length > 0 ? "所选" : "全部";
 
-  return <section className="page-stack">
-    <PageHeader title="请求记录" subtitle={contentCapture.enabled ? "正在原样保存新的 Responses 请求和响应内容。" : "仅保存状态、耗时和请求大小；内容记录当前已关闭。"} action={<div className="request-actions"><label className="capture-toggle"><span>记录内容</span><Switch checked={contentCapture.enabled} onCheckedChange={enabled => void onCaptureEnabledChange(enabled)} aria-label="记录内容" /></label>{(contentCapture.enabled || hasCapturedContent) && <Button variant="outline" size="xs" disabled={busy} onClick={() => setConfirmClear("contents")}>{clearing ? "清空中…" : "清空内容"}</Button>}{logs.length > 0 && <Button variant="outline" size="xs" disabled={busy} onClick={() => setConfirmClear("logs")}>{clearingLogs ? "清理中…" : "清理记录"}</Button>}<Button variant="quiet" size="xs" onClick={() => void onRefresh()}><Icon name="refresh" size="xs" />刷新</Button></div>} />
-    <div className="table-panel">
-      <table><thead><tr><th>时间</th><th>Provider</th><th>状态</th><th>结果</th><th>请求大小</th><th>耗时</th><th>内容</th><th>错误</th></tr></thead>
-        <tbody>{logs.map(log => <tr key={log.id}><td>{formatTime(log.startedAt)}</td><td>{log.providerName ?? "—"}</td><td><HttpStatus statusCode={log.statusCode} /></td><td>{outcomeLabel(log.outcome)}{log.retryCount > 0 && <small className="retry-note">自动重试 {log.retryCount} 次</small>}</td><td>{formatBytes(log.requestBytes)}</td><td>{log.durationMs} ms</td><td>{log.contentCaptured ? <Button className="content-button" variant="text" size="xs" onClick={() => setViewingCapture(log.id)}>查看</Button> : "—"}</td><td className="error-cell" title={log.error}>{log.error ?? "—"}</td></tr>)}</tbody>
+  return <section className="page-stack requests-page">
+    <PageHeader
+      title="请求记录"
+      subtitle={contentCapture.enabled ? "正在原样保存新的 Responses 请求和响应内容。" : "仅保存状态、耗时和请求大小；内容记录当前已关闭。"}
+      action={<div className="request-actions">
+        <label className="capture-toggle"><span>记录内容</span><Switch checked={contentCapture.enabled} disabled={busy} onCheckedChange={enabled => void onCaptureEnabledChange(enabled)} aria-label="记录内容" /></label>
+        {(contentCapture.enabled || hasCapturedContent) && <Button variant="outline" size="xs" disabled={busy} onClick={() => setConfirmClear("contents")}>{clearing ? "清空中…" : "清空内容"}</Button>}
+        {logs.length > 0 && <Button variant="outline" size="xs" disabled={busy} onClick={() => setConfirmClear("logs")}>{clearingLogs ? "清理中…" : "清理记录"}</Button>}
+        <Button variant="quiet" size="xs" disabled={busy} onClick={() => void onRefresh()}><Icon name="refresh" size="xs" />刷新</Button>
+      </div>}
+    />
+    <div className="request-toolbar">
+      <div className="request-selection-actions">
+        <span role="status">已选 <strong>{selectedLogs.length}</strong> / 共 {logs.length} 条</span>
+        <Button variant="text" size="xs" disabled={busy || logs.length === 0} onClick={() => setSelectedIds(new Set(allSelected ? [] : logs.map(log => log.id)))}>{allSelected ? "取消全选" : "全选"}</Button>
+        <Button variant="text" size="xs" disabled={busy || logs.length === 0} onClick={() => setSelectedIds(new Set(logs.filter(log => !selectedIds.has(log.id)).map(log => log.id)))}>反选</Button>
+        <Button variant="text" size="xs" disabled={busy || selectedLogs.length === 0} onClick={() => setSelectedIds(new Set())}>取消选择</Button>
+      </div>
+      <div className="request-actions">
+        <Button variant="outline" size="xs" disabled={busy || selectedLogs.length === 0} onClick={() => void transferRecords("copy", selectedLogs)}>{working === "copy" ? "复制中…" : "复制所选"}</Button>
+        <Button variant="outline" size="xs" disabled={busy || logs.length === 0} onClick={() => void transferRecords("json", exportLogs)}>{working === "json" ? "导出中…" : `导出${exportScope} JSON`}</Button>
+        <Button variant="outline" size="xs" disabled={busy || logs.length === 0} onClick={() => void transferRecords("csv", exportLogs)}>{working === "csv" ? "导出中…" : `导出${exportScope} CSV`}</Button>
+      </div>
+      <div className="request-export-options">
+        <Checkbox size="sm" checked={includeContent} disabled={busy} onCheckedChange={setIncludeContent}>JSON 和复制包含已记录的请求与响应正文</Checkbox>
+        <span>CSV 仅包含元数据</span>
+      </div>
+    </div>
+    <div className="table-panel request-table-panel" aria-busy={busy}>
+      <table>
+        <thead><tr>
+          <th className="request-select-cell"><Checkbox size="sm" aria-label="选择全部请求记录" checked={allSelected} indeterminate={selectedLogs.length > 0 && !allSelected} disabled={busy || logs.length === 0} onCheckedChange={checked => setSelectedIds(new Set(checked ? logs.map(log => log.id) : []))} /></th>
+          <th>时间</th><th>Provider</th><th>模型</th><th>状态</th><th>结果</th><th>请求大小</th><th>耗时</th><th>操作</th><th>错误</th>
+        </tr></thead>
+        <tbody>{logs.map(log => <tr key={log.id} className={selectedIds.has(log.id) ? "selected" : ""}>
+          <td className="request-select-cell"><Checkbox size="sm" aria-label={`选择请求 ${log.id}`} checked={selectedIds.has(log.id)} disabled={busy} onCheckedChange={() => toggleSelection(log.id)} /></td>
+          <td>{formatTime(log.startedAt)}</td><td>{log.providerName ?? "—"}</td>
+          <td className="request-model-cell" title={log.model}>{log.model ?? "—"}</td>
+          <td><HttpStatus statusCode={log.statusCode} /></td>
+          <td>{outcomeLabel(log.outcome)}{log.retryCount > 0 && <small className="retry-note">自动重试 {log.retryCount} 次</small>}</td>
+          <td>{formatBytes(log.requestBytes)}</td><td>{log.durationMs} ms</td>
+          <td><div className="request-row-actions">
+            {log.contentCaptured && <Button variant="text" size="xs" disabled={busy} onClick={() => setViewingCapture(log.id)}>查看</Button>}
+            <Button variant="text" size="xs" aria-label={`复制请求记录 ${log.id}`} disabled={busy} onClick={() => void transferRecords("copy", [log])}>复制</Button>
+          </div></td>
+          <td className="error-cell" title={log.error}>{log.error ?? "—"}</td>
+        </tr>)}</tbody>
       </table>
       {logs.length === 0 && <Empty icon={<Icon name="history" />} title="暂无请求记录" description="经由 EasyAPI 的请求会出现在这里。" />}
     </div>
     <ConfirmDialog open={Boolean(confirmClear)} title={confirmClear === "logs" ? "清理全部请求记录？" : "清空已记录的内容？"} message={confirmClear === "logs" ? "请求元数据及请求与响应内容都会被删除，无法撤销。" : "请求与响应正文会被删除，元数据保留。此操作无法撤销。"} confirmText="确认清理" cancelText="取消" confirmDanger onOpenChange={() => setConfirmClear(null)} onConfirm={async () => { if (confirmClear === "logs") await clearLogs(); else await clearCaptures(); setConfirmClear(null); }} />
-    {viewingCapture && <RequestCaptureDialog id={viewingCapture} onClose={() => setViewingCapture(null)} />}
+    {viewingCapture && <RequestCaptureDialog key={viewingCapture} id={viewingCapture} onClose={() => setViewingCapture(null)} />}
   </section>;
 }
 
 function RequestCaptureDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const [capture, setCapture] = useState<RequestCapture | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void api.getRequestCapture(id).then(setCapture).catch(error => setError(errorText(error)));
+    let cancelled = false;
+    void api.getRequestCapture(id).then(value => { if (!cancelled) setCapture(value); }).catch(error => { if (!cancelled) setError(errorText(error)); });
+    return () => { cancelled = true; };
   }, [id]);
 
+  async function transferContent(action: "copy" | "export", title: string, content: string) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      if (action === "copy") {
+        await api.copyRequestContent(content);
+        setMessage(`已复制${title}原文`);
+      } else {
+        const path = await api.saveRequestExport(content, "txt");
+        if (path) setMessage(`已保存${title}原文至 ${path}`);
+      }
+    } catch (error) {
+      setError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <Dialog open onOpenChange={onClose} size="2xl">
-    <DialogHeader><DialogHeading><DialogTitle>请求与响应内容</DialogTitle><DialogDescription>{id}</DialogDescription></DialogHeading><DialogClose aria-label="关闭" /></DialogHeader>
+    <DialogHeader><DialogHeading><DialogTitle>请求与响应内容</DialogTitle><DialogDescription>{id}</DialogDescription></DialogHeading><DialogClose aria-label="关闭内容详情" /></DialogHeader>
     <DialogBody>
       {error && <Alert tone="error" message={error} />}
+      {message && <Alert className="capture-message" role="status" tone="success" message={message} />}
       {!capture && !error && <LoadingState>正在读取内容记录…</LoadingState>}
       {capture && <div className="page-stack">
         {capture.captureError && <Alert tone="error" message={capture.captureError} />}
-        <CaptureSection title="请求" contentType={capture.requestContentType} bytes={capture.requestCapturedBytes} complete={capture.requestComplete} content={capture.requestContent} />
-        <CaptureSection title="响应" contentType={capture.responseContentType} bytes={capture.responseCapturedBytes} complete={capture.responseComplete} content={capture.responseContent} />
+        <CaptureSection title="请求" contentType={capture.requestContentType} bytes={capture.requestCapturedBytes} complete={capture.requestComplete} content={capture.requestContent} busy={busy} onTransfer={transferContent} />
+        <CaptureSection title="响应" contentType={capture.responseContentType} bytes={capture.responseCapturedBytes} complete={capture.responseComplete} content={capture.responseContent} busy={busy} onTransfer={transferContent} />
       </div>}
     </DialogBody>
   </Dialog>;
 }
 
-function CaptureSection({ title, contentType, bytes, complete, content }: { title: string; contentType?: string; bytes: number; complete: boolean; content?: string }) {
-  return <section className="capture-section"><div className="capture-section-header"><h3>{title}</h3><span>{contentType ?? "未知类型"} · {formatBytes(bytes)} · {complete ? "完整" : "未完整"}</span></div><pre>{content ?? "内容文件不可用"}</pre></section>;
+function CaptureSection({ title, contentType, bytes, complete, content, busy, onTransfer }: {
+  title: string; contentType?: string; bytes: number; complete: boolean; content?: string; busy: boolean;
+  onTransfer: (action: "copy" | "export", title: string, content: string) => Promise<void>;
+}) {
+  return <section className="capture-section">
+    <div className="capture-section-header">
+      <div className="capture-section-meta"><h3>{title}</h3><span>{contentType ?? "未知类型"} · {formatBytes(bytes)} · {complete ? "完整" : "未完整"}</span></div>
+      <div className="request-actions">
+        <Button variant="text" size="xs" disabled={busy || content == null} onClick={() => { if (content != null) void onTransfer("copy", title, content); }}>复制{title}</Button>
+        <Button variant="text" size="xs" disabled={busy || content == null} onClick={() => { if (content != null) void onTransfer("export", title, content); }}>保存原文</Button>
+      </div>
+    </div>
+    <pre>{content ?? "内容文件不可用"}</pre>
+  </section>;
 }
 
 function outcomeLabel(outcome: string) {
