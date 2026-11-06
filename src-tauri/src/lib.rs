@@ -1,3 +1,4 @@
+mod codex_config;
 mod codex_oauth;
 mod commands;
 mod logging;
@@ -42,6 +43,9 @@ pub fn run() {
             let oauth = codex_oauth::CodexOAuthManager::new(app_data_dir.join("codex_oauth.json"))?;
             let state = AppState::new(db, listen_address.clone(), oauth)?;
             app.manage(state.clone());
+            app.manage(codex_config::CodexConfigManager::new(
+                app.path().home_dir()?,
+            ));
 
             let proxy_state = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -104,6 +108,8 @@ pub fn run() {
             commands::clear_request_captures,
             commands::clear_request_logs,
             commands::get_codex_setup,
+            commands::get_codex_connection,
+            commands::switch_codex_connection,
             commands::test_provider,
             commands::list_provider_models,
             commands::start_codex_oauth_login,

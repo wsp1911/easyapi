@@ -105,3 +105,5 @@ tbody tr:hover { background: var(--openbitfun-color-action-quiet-hover); }
   .stats-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+.connection-path { margin: 0; overflow-wrap: anywhere; }

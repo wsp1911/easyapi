@@ -7,6 +7,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
+    codex_config::{CodexConfigManager, ConnectionMode, ConnectionStatus, SwitchResult},
     codex_oauth::{DeviceCode, OAuthStatus},
     models::{
         AppStatus, CodexSetup, ContentCaptureStatus, ProviderInput, ProviderTestResult,
@@ -194,6 +195,27 @@ pub fn clear_request_captures(state: State<'_, Arc<AppState>>) -> Result<(), Str
 #[tauri::command]
 pub fn clear_request_logs(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.db.clear_request_logs()
+}
+
+#[tauri::command]
+pub fn get_codex_connection(
+    config: State<'_, CodexConfigManager>,
+) -> Result<ConnectionStatus, String> {
+    config.status()
+}
+
+#[tauri::command]
+pub fn switch_codex_connection(
+    state: State<'_, Arc<AppState>>,
+    config: State<'_, CodexConfigManager>,
+    mode: ConnectionMode,
+) -> Result<SwitchResult, String> {
+    let setup = build_codex_setup(
+        &state.listen_address,
+        &state.local_token,
+        std::env::consts::OS,
+    );
+    config.switch(mode, &setup.config_toml_with_headers)
 }
 
 #[tauri::command]

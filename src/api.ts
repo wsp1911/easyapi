@@ -94,6 +94,19 @@ export type CodexSetup = {
   localToken: string;
 };
 
+export type CodexConnectionMode = "easyapi" | "official";
+export type CodexConnectionStatus = {
+  configPath: string;
+  exists: boolean;
+  provider: string;
+  profile?: string | null;
+};
+export type CodexSwitchResult = {
+  status: CodexConnectionStatus;
+  changed: boolean;
+  backupPaths: string[];
+};
+
 export type DeviceCode = { deviceCode: string; userCode: string; verificationUri: string; expiresIn: number; interval: number };
 export type OAuthStatus = { authenticated: boolean; accountId?: string; email?: string; expiresAt?: number };
 
@@ -115,6 +128,8 @@ export const api = {
   clearRequestCaptures: () => invoke<void>("clear_request_captures"),
   clearRequestLogs: () => invoke<void>("clear_request_logs"),
   getCodexSetup: () => invoke<CodexSetup>("get_codex_setup"),
+  getCodexConnection: () => invoke<CodexConnectionStatus>("get_codex_connection"),
+  switchCodexConnection: (mode: CodexConnectionMode) => invoke<CodexSwitchResult>("switch_codex_connection", { mode }),
   startCodexOAuthLogin: () => invoke<DeviceCode>("start_codex_oauth_login"),
   pollCodexOAuthLogin: (deviceCode: string, userCode: string) => invoke<boolean>("poll_codex_oauth_login", { deviceCode, userCode }),
   getCodexOAuthStatus: () => invoke<OAuthStatus>("get_codex_oauth_status"),
