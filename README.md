@@ -26,6 +26,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows / macOS 本地代理，m
 - Codex 配置和平台对应的环境变量命令生成（Windows PowerShell / macOS zsh）
 - Codex 配置页提供 `env_key` 本地认证配置，以及 Windows / macOS 对应的本机地址绕过代理命令
 - 上游网络可选择系统代理、直连或手动 HTTP / HTTPS / SOCKS5 代理；本机上游服务始终绕过代理
+- 界面复用 OpenBitFun Design System，支持深色 / 浅色主题切换并记住本机偏好
 
 ## 明确不做的事情
 
@@ -42,6 +43,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows / macOS 本地代理，m
 - Rust、Tokio、Axum、Reqwest
 - Tauri 2
 - React 19、TypeScript、Vite
+- OpenBitFun Design System（`@openbitfun/ui`、`@openbitfun/design-tokens`、`@openbitfun/theme-openbitfun`）
 - SQLite（rusqlite）
 - Windows Credential Manager / macOS Keychain（keyring）
 
@@ -349,3 +351,11 @@ src-tauri/src/
 - 检测并拒绝 Provider 指向 EasyAPI 自身的请求回环
 
 测试不会调用真实模型 API。
+
+### 前端设计系统
+
+界面使用 `@openbitfun/ui` 的导航、列表、表单、选择菜单、弹窗和配置向导。
+`src/App.css` 只负责产品布局和数据表格，不覆盖组件内部按钮、输入框、状态标签等外观。
+三个依赖包的离线分发快照位于 `vendor/openbitfun/`；其中的 `dist/` 需要随仓库提交，
+干净检出后运行 `pnpm install --frozen-lockfile` 即可构建，不依赖本机的 OpenBitFun 仓库路径。
+快照保留上游 JS、CSS、类型声明及许可证，包清单移除了不适用于分发快照的源码构建脚本和开发依赖。

@@ -1,0 +1,54 @@
+{
+  "name": "@openbitfun/ui",
+  "version": "0.1.0",
+  "description": "Theme-independent React components for OpenBitFun product surfaces",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./registry": {
+      "types": "./dist/types/registry.d.ts",
+      "import": "./dist/registry.js"
+    },
+    "./brand": {
+      "types": "./dist/types/brand.d.ts",
+      "import": "./dist/brand.js"
+    },
+    "./flow-chat": {
+      "types": "./dist/types/flow-chat.d.ts",
+      "import": "./dist/flow-chat.js"
+    },
+    "./mobile": {
+      "types": "./dist/types/mobile.d.ts",
+      "import": "./dist/mobile.js"
+    },
+    "./mobile.css": "./dist/mobile.css",
+    "./styles.css": "./dist/styles.css",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "dependencies": {
+    "@openbitfun/design-tokens": "workspace:^",
+    "lucide-react": "^0.560.0"
+  },
+  "peerDependencies": {
+    "react": ">=18.3.0 <20",
+    "react-dom": ">=18.3.0 <20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "private": true
+}

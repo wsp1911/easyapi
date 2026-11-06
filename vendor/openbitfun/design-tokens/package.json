@@ -1,0 +1,34 @@
+{
+  "name": "@openbitfun/design-tokens",
+  "version": "0.1.0",
+  "description": "Framework-neutral design token contract and system scales for OpenBitFun UI packages",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tokens.css": "./dist/tokens.css",
+    "./tokens.json": "./dist/tokens.json",
+    "./typography-runtime": {
+      "types": "./dist/typography-runtime.d.ts",
+      "import": "./dist/typography-runtime.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "private": true
+}
