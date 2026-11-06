@@ -13,7 +13,7 @@ import {
   StatusPill, Switch, ThemeRoot, Toolbar,
 } from "@openbitfun/ui";
 import { themes } from "@openbitfun/theme-openbitfun";
-import { api, AppStatus, CodexSetup, ContentCaptureStatus, HeaderPair, Provider, ProviderInput, ProviderTestResult, ProxySettings, RequestCapture, RequestLog, OAuthStatus } from "./api";
+import { api, AppStatus, CodexSetup, CodexConnectionMode, CodexConnectionStatus, CodexSwitchResult, ContentCaptureStatus, HeaderPair, Provider, ProviderInput, ProviderTestResult, ProxySettings, RequestCapture, RequestLog, OAuthStatus } from "./api";
 import "./App.css";
 
 type Page = "overview" | "providers" | "requests" | "stats" | "setup" | "settings";
@@ -127,8 +127,10 @@ export default function App() {
       await api.switchProvider(provider.id);
       setNotice(`已切换到 ${provider.name}，只影响之后的新请求`);
       await refresh();
+      return true;
     } catch (error) {
       setNotice(errorText(error));
+      return false;
     }
   }
 
@@ -223,7 +225,7 @@ function Overview({ status, active, providers, logs, oauthAuthenticated, onSwitc
   onSwitch: (provider: Provider) => void; onManage: () => void; onRequests: () => void;
 }) {
   return <section className="page-stack">
-    <PageHeader title="概览" subtitle="连接、切换，继续工作。" action={<Button variant="outline" size="sm" leadingIcon={<Icon name="layers" size="xs" />} onClick={onManage}>管理 Provider</Button>} />
+    <PageHeader title="概览" subtitle="查看 EasyAPI 当前上游和请求状态，在 Provider 页面切换连接方式。" action={<Button variant="outline" size="sm" leadingIcon={<Icon name="layers" size="xs" />} onClick={onManage}>管理 Provider</Button>} />
     <div className="connection-strip">
       <Avatar shape="square" size="lg" icon={<Icon name="route" size="md" />} />
       <div className="connection-copy"><span className="muted">当前上游</span><h2>{active?.name ?? "尚未连接上游"}</h2><span className="mono muted">{active?.baseUrl ?? "添加并激活 Provider，即可开始转发请求"}</span></div>
@@ -344,7 +346,7 @@ function StatisticsPage({ logs }: { logs: RequestLog[] }) {
 }
 
 function ProvidersPage({ providers, onAdd, onEdit, onSwitch, onDelete, notify }: {
-  providers: Provider[]; onAdd: () => void; onEdit: (p: Provider) => void; onSwitch: (p: Provider) => void;
+  providers: Provider[]; onAdd: () => void; onEdit: (p: Provider) => void; onSwitch: (p: Provider) => Promise<boolean>;
   onDelete: (p: Provider) => void; notify: (value: string) => void;
 }) {
   const [testing, setTesting] = useState<string | null>(null);
@@ -352,6 +354,57 @@ function ProvidersPage({ providers, onAdd, onEdit, onSwitch, onDelete, notify }:
   const [oauth, setOauth] = useState<OAuthStatus | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [device, setDevice] = useState<{ deviceCode: string; userCode: string; verificationUri: string; interval: number } | null>(null);
+
+  const [connection, setConnection] = useState<CodexConnectionStatus | null>(null);
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [switchResult, setSwitchResult] = useState<CodexSwitchResult | null>(null);
+
+  const refreshConnection = useCallback(async () => {
+    setConnectionBusy(true);
+    setConnectionError(null);
+    setSwitchResult(null);
+    if (!isTauri()) {
+      setConnectionBusy(false);
+      return;
+    }
+    try {
+      setConnection(await api.getCodexConnection());
+    } catch (error) {
+      setConnection(null);
+      setConnectionError(errorText(error));
+    } finally {
+      setConnectionBusy(false);
+    }
+  }, []);
+
+  useEffect(() => { void refreshConnection(); }, [refreshConnection]);
+
+  async function selectConnection(mode: CodexConnectionMode, provider?: Provider) {
+    setConnectionBusy(true);
+    setConnectionError(null);
+    setSwitchResult(null);
+    try {
+      if (provider && !(await onSwitch(provider))) return;
+      // Switching upstreams inside EasyAPI remains immediate. A change of
+      // Codex connection mode also updates its configuration and needs restart.
+      if (mode === "easyapi" && connection?.provider === "easyapi") return;
+      const result = await api.switchCodexConnection(mode);
+      setConnection(result.status);
+      setSwitchResult(result);
+      if (result.changed) notify("连接模式已切换，请完全退出并重启 Codex");
+    } catch (error) {
+      setConnectionError(errorText(error));
+      // A failed multi-file write may have required recovery. Always re-read
+      // the actual configuration instead of retaining a stale mode label.
+      try { setConnection(await api.getCodexConnection()); }
+      catch { setConnection(null); }
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+  const usesEasyapi = connection?.provider === "easyapi";
+  const usesOfficial = connection?.provider === "openai";
 
   useEffect(() => { void api.getCodexOAuthStatus().then(setOauth).catch(() => undefined); }, []);
 
@@ -387,32 +440,42 @@ function ProvidersPage({ providers, onAdd, onEdit, onSwitch, onDelete, notify }:
   }
 
   return <section className="page-stack">
-    <PageHeader title="Provider" subtitle="管理你的上游连接与认证。" action={<Button variant="primary" size="sm" leadingIcon={<Icon name="plus" size="xs" />} onClick={onAdd}>添加 Provider</Button>} />
-    <FormSection title="已保存的连接" description={`${providers.length} 个 Provider · 点击名称展开连接详情`}>
+    <PageHeader title="Provider" subtitle="选择官方订阅直连，或通过 EasyAPI 连接下方任意上游。" action={<Button variant="primary" size="sm" disabled={connectionBusy} leadingIcon={<Icon name="plus" size="xs" />} onClick={onAdd}>添加 Provider</Button>} />
+    <FormSection className="connection-panel" title="Codex 当前连接" aria-busy={connectionBusy} description={connection ? usesEasyapi ? "EasyAPI Provider" : usesOfficial ? "官方订阅直连（需 ChatGPT 登录）" : `其他 Provider（${connection.provider}）` : connectionBusy ? "读取中…" : isTauri() ? "无法读取配置" : "请在桌面应用中查看连接配置"} actions={<Button variant="quiet" size="sm" disabled={connectionBusy || !isTauri()} leadingIcon={<Icon name="refresh" size="xs" />} onClick={() => void refreshConnection()}>刷新配置</Button>}>
+      <p className="page-note"><Icon name="info" size="xs" />官方订阅直连与 EasyAPI 之间切换会自动备份配置，并需要重启 Codex；EasyAPI 内切换上游立即生效。</p>
+      {connection && <Disclosure summary="配置详情"><div className="setup-guidance"><p className="connection-path">配置文件：<code>{connection.configPath}</code>{connection.profile && <><br />默认配置方案：<code>{connection.profile}</code>（同时切换该方案）</>}</p><p>此处显示已保存的用户配置；命令行 --profile / -c 和管理员策略可能覆盖它。</p></div></Disclosure>}
+      {connectionError && <Alert tone="error" role="alert" message={connectionError} />}
+      {switchResult && <Alert className="connection-result" tone="warning" role="status" message={switchResult.changed ? "配置已切换，请完全退出并重启 Codex" : "配置已是所选模式；如 Codex 尚未使用该模式，请重启"} description={<div className="setup-guidance"><p>修改前已备份，保留模型、MCP 和其他配置。macOS 使用 ⌘Q 退出；Windows 请关闭 Codex 进程后重新打开。</p>{switchResult.backupPaths.map(path => <p className="connection-path" key={path}>原配置备份：<code>{path}</code></p>)}</div>} />}
+    </FormSection>
+    <FormSection title="已保存的连接" description={`${providers.length} 个上游及官方订阅直连 · 点击名称展开详情`}>
       <div className="provider-list">
-        {providers.length === 0 && <Empty icon={<Icon name="plug" />} title="还没有 Provider" description="添加上游 Base URL 和认证信息，即可开始使用。" actions={<Button variant="fill" size="sm" onClick={onAdd}>添加第一个 Provider</Button>} />}
+        <Disclosure className="provider-disclosure official-provider" summary="官方订阅直连" description="Codex → OpenAI · ChatGPT 订阅" leading={<Avatar shape="square" size="sm">O</Avatar>} actions={<div className="provider-actions"><StatusPill tone={usesOfficial ? "success" : "neutral"}>{usesOfficial ? "已选择" : "官方直连"}</StatusPill><Button size="sm" variant="fill" disabled={connectionBusy || !connection || usesOfficial} onClick={() => void selectConnection("official")}>{usesOfficial ? "已选择" : "使用官方订阅"}</Button></div>}>
+          <div className="provider-details"><dl><div><dt>认证方式</dt><dd>Codex 自己的 ChatGPT 登录</dd></div><div><dt>请求路径</dt><dd>直接连接官方，可退出 EasyAPI</dd></div><div><dt>切换生效</dt><dd>完全退出并重启 Codex</dd></div></dl><p className="page-note"><Icon name="info" size="xs" />直连使用 Codex 自身的登录，EasyAPI OAuth 登录不会自动同步。</p></div>
+        </Disclosure>
+        {providers.length === 0 && <Empty icon={<Icon name="plug" />} title="还没有 Provider" description="添加上游 Base URL 和认证信息，即可开始使用。" actions={<Button variant="fill" size="sm" disabled={connectionBusy} onClick={onAdd}>添加第一个 Provider</Button>} />}
         {providers.map(provider => {
           const result = results[provider.id];
           const authenticated = provider.authType === "codex_oauth" ? Boolean(oauth?.authenticated) : provider.hasApiKey;
+          const selected = provider.active && usesEasyapi;
           return <Disclosure key={provider.id} className="provider-disclosure" summary={provider.name} description={provider.baseUrl} leading={<Avatar shape="square" size="sm">{provider.name.slice(0, 1).toUpperCase()}</Avatar>} actions={<div className="provider-actions">
-            <StatusPill tone={provider.active ? "success" : authenticated ? "neutral" : "warning"}>{provider.active ? "使用中" : authenticated ? "已就绪" : "待认证"}</StatusPill>
-            {!provider.active && <Button size="sm" variant="fill" disabled={!authenticated} onClick={() => onSwitch(provider)}>使用此上游</Button>}
-            <IconButton size="sm" variant="quiet" aria-label={`编辑 ${provider.name}`} icon={<Icon name="edit" size="sm" />} onClick={() => onEdit(provider)} />
-            <IconButton size="sm" variant="quiet" tone="danger" aria-label={`删除 ${provider.name}`} icon={<Icon name="delete" size="sm" />} onClick={() => onDelete(provider)} />
+            <StatusPill tone={selected ? "success" : authenticated ? "neutral" : "warning"}>{selected ? "使用中" : provider.active ? "代理已选上游" : authenticated ? "已就绪" : "待认证"}</StatusPill>
+            {!selected && <Button size="sm" variant="fill" loading={connectionBusy} disabled={connectionBusy || !connection || !authenticated} onClick={() => void selectConnection("easyapi", provider)}>使用此上游</Button>}
+            <IconButton size="sm" variant="quiet" disabled={connectionBusy} aria-label={`编辑 ${provider.name}`} icon={<Icon name="edit" size="sm" />} onClick={() => onEdit(provider)} />
+            <IconButton size="sm" variant="quiet" tone="danger" disabled={connectionBusy} aria-label={`删除 ${provider.name}`} icon={<Icon name="delete" size="sm" />} onClick={() => onDelete(provider)} />
           </div>}>
             <div className="provider-details">
               <dl><div><dt>认证方式</dt><dd>{provider.authType === "codex_oauth" ? "ChatGPT 官方订阅" : "API Key"}</dd></div><div><dt>认证状态</dt><dd>{authenticated ? "凭据已保存" : "尚未完成认证"}</dd></div><div><dt>测试模型</dt><dd>{provider.testModel || "未设置"}</dd></div><div><dt>额外请求头</dt><dd>{provider.extraHeaders.length} 项</dd></div></dl>
-              <div className="inline-actions"><Button size="sm" variant="outline" loading={testing === provider.id} disabled={!provider.testModel} leadingIcon={<Icon name="route" size="xs" />} onClick={() => void test(provider)}>测试连接</Button>{result && <StatusPill tone={result.ok ? "success" : "danger"}>{result.statusCode ?? "连接失败"} · {result.latencyMs} ms</StatusPill>}</div>
+              <div className="inline-actions"><Button size="sm" variant="outline" loading={testing === provider.id} disabled={connectionBusy || !provider.testModel} leadingIcon={<Icon name="route" size="xs" />} onClick={() => void test(provider)}>测试连接</Button>{result && <StatusPill tone={result.ok ? "success" : "danger"}>{result.statusCode ?? "连接失败"} · {result.latencyMs} ms</StatusPill>}</div>
             </div>
           </Disclosure>;
         })}
       </div>
     </FormSection>
-    <FormSection title="ChatGPT 官方订阅" description="通过设备码登录，为官方订阅 Provider 提供认证。">
+    <FormSection title="ChatGPT OAuth（经 EasyAPI）" description="此处登录用于 EasyAPI 转发官方订阅请求，与 Codex 自身的订阅直连登录独立。">
       <FieldGroup appearance="subtle"><FieldRow><div className="account-row"><Avatar icon={<Icon name="user" size="sm" />} /><div className="account-copy"><strong>{oauth?.authenticated ? (oauth.email ?? oauth.accountId ?? "ChatGPT 账号") : "尚未登录"}</strong><span className="muted">{oauth?.authenticated ? "认证凭据已单独保存" : "支持 ChatGPT Plus / Pro 订阅"}</span></div><Button size="sm" variant="outline" loading={oauthBusy} onClick={() => void loginOAuth()}>{oauth?.authenticated ? "重新登录" : "登录 ChatGPT"}</Button>{oauth?.authenticated && <Button size="sm" variant="quiet" onClick={() => void api.logoutCodexOAuth().then(() => { setOauth({ authenticated: false }); notify("已退出 ChatGPT OAuth"); }).catch(error => notify(errorText(error)))}>退出</Button>}</div></FieldRow></FieldGroup>
       {device && <Alert tone="info" message={`设备码：${device.userCode}`} description="请完成浏览器授权，登录状态会自动更新。" />}
     </FormSection>
-    <p className="page-note"><Icon name="info" size="xs" />切换只影响新请求；进行中的请求继续使用原 Provider。</p>
+    <p className="page-note"><Icon name="info" size="xs" />EasyAPI 内切换上游只影响新请求，进行中的请求继续使用原 Provider。切换到或离开官方订阅直连则需重启 Codex。</p>
   </section>;
 }
 
@@ -594,7 +657,7 @@ $env:NO_PROXY = $easyapiNoProxy`;
   }
   if (!setup) return isTauri() ? <LoadingState>正在加载配置…</LoadingState> : <Empty icon={<Icon name="terminal" />} title="请在桌面应用中查看配置" description="本地认证 Token 与平台命令由桌面应用生成。" />;
   return <section className="page-stack">
-    <PageHeader title="Codex 配置" subtitle="完成以下配置后，所有上游切换都在 EasyAPI 内完成。" />
+    <PageHeader title="Codex 配置" subtitle="手动接入与故障排查。连接方式请在 Provider 页面切换。" />
     <div className="setup-navigation" ref={stepNavigation}>
       <SegmentedControl aria-label="配置步骤" labelBehavior="static" distribution="fill" variant="pills" value={String(step)} onValueChange={value => changeStep(Number(value))} options={[
         { value: "0", label: "1. 本地认证" },

@@ -22,6 +22,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows / macOS 本地代理，m
 - 手动连接测试
 - Codex 官方 ChatGPT Plus/Pro 订阅 OAuth 登录，自动刷新 access token
 - 官方订阅也作为 EasyAPI 内部 Provider，可在不重启 Codex 的情况下切换
+- Provider 页提供“官方订阅直连”选项，可一键切换直连或任意 EasyAPI 上游，自动备份用户配置，切换后重启 Codex 生效
 - 官方订阅的 Responses 请求会流式兼容 ChatGPT Codex 后端：移除顶层 `max_output_tokens`，并强制使用 `store: false`。生图和改图请求保持原样转发
 - Codex 配置和平台对应的环境变量命令生成（Windows PowerShell / macOS zsh）
 - Codex 配置页提供 `env_key` 本地认证配置，以及 Windows / macOS 对应的本机地址绕过代理命令
@@ -103,13 +104,18 @@ pnpm tauri build
    - API Key
    - 可选测试模型
    - 官方 ChatGPT Plus/Pro 订阅可选择“ChatGPT 官方订阅 OAuth”，然后完成浏览器设备码登录
-3. 点击“切换”，激活该 Provider。
-4. 打开“Codex 配置”页面。
-5. 执行页面按系统生成的命令，设置 `EASYAPI_LOCAL_TOKEN`：Windows 使用 PowerShell，macOS 使用终端中的 zsh。
-6. 将页面生成的 Provider 配置加入用户级 `~/.codex/config.toml`。
-7. 重启一次 Codex。以后切换上游不再需要重启 Codex。
+3. 在对应 Provider 点击“使用此上游”，激活上游；若 Codex 当前使用直连或其他 Provider，会自动切换到 EasyAPI 并写入本地认证请求头，无需手动设置 `EASYAPI_LOCAL_TOKEN`。
+4. 连接模式变化后，按页面提示完全退出并重新打开 Codex。以后在 EasyAPI 内切换上游不再需要重启 Codex。
 
-官方 OAuth 的凭据由 EasyAPI 单独保存并在请求时刷新；Codex 始终只看到 `easyapi` 这一个本地 Provider，因此切换到或离开官方订阅不会改变 Codex 的会话列表归属。
+需要让 Codex 直接使用 ChatGPT 订阅时，在 Provider 页的“官方订阅直连”条目点击“使用官方订阅”，再完全退出并重启 Codex。此时 Codex 直接连接 OpenAI，可以退出 EasyAPI；请确认 Codex 自己已通过 ChatGPT 登录。EasyAPI 内的 OAuth 登录独立保存，不会同步到 Codex，也不会在切换时改写 Codex 的 `auth.json` 或系统凭据库。
+
+一键切换修改用户级配置（默认 `~/.codex/config.toml`；设置了 `CODEX_HOME` 时使用该目录）。修改前将原文件完整备份到同目录的 `config.toml.easyapi-<UTC 时间>-<唯一 ID>.bak`；没有原文件时直接创建，重复应用相同配置不会新增备份。使用 TOML 编辑器保留注释、模型、MCP、其他 Provider 和无关设置；切换到直连时保留 EasyAPI 配置供之后切回。Unix 上新写入的配置及备份仅当前用户可读写。
+
+设置了默认 `profile` 时，同时更新该方案的 Provider 覆盖，包括内嵌的 `[profiles.<name>]` 和已有的 `<name>.config.toml` 文件，独立文件分别备份。其他方案保持原样。页面显示保存的配置，并可手动刷新；显式 `--profile` / `-c` 启动参数和管理员策略仍可能覆盖用户配置。配置损坏、备份失败或发现外部修改时不会覆盖原配置。若配置限制为 API Key 登录（`forced_login_method = "api"`）或指定了自定义 `chatgpt_base_url`，需先处理该设置再切换官方订阅直连。
+
+需要手动接入时，打开“Codex 配置”页，执行设置 `EASYAPI_LOCAL_TOKEN` 的命令，并将 Provider 配置加入用户级配置文件。
+
+通过 EasyAPI 内部 Provider 使用官方 OAuth 时，凭据由 EasyAPI 单独保存并在请求时刷新；Codex 始终只看到 `easyapi` 这一个本地 Provider，因此在 EasyAPI 内切换到或离开官方订阅不会改变 Codex 的会话列表归属。一键切换官方订阅直连则会将 Codex 的 Provider 改为 `openai`，不会迁移或改写历史会话。
 
 macOS 的配置命令会将 `export EASYAPI_LOCAL_TOKEN=…` 写入 `${ZDOTDIR:-$HOME}/.zshrc`，使以后从 zsh 终端启动的 Codex 自动继承 Token；重复执行同一命令不会重复添加配置。命令还会通过 `launchctl setenv` 设置当前登录会话的桌面应用环境变量。执行后需完全退出 Codex（⌘Q）再打开。
 
