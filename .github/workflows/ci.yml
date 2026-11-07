@@ -60,5 +60,8 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
+      - name: Test frontend
+        run: pnpm test
+
       - name: Test Rust
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }}

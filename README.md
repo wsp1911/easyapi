@@ -17,6 +17,7 @@ EasyAPI 是一个面向 Codex Responses API 的 Windows / macOS 本地代理，m
 - Provider 元数据和脱敏请求记录保存到 SQLite
 - 运行日志按启动实例落盘并自动轮转
 - 可选记录 Responses 请求和响应的原始内容，默认关闭
+- 请求记录支持多选、全选、反选、复制及 JSON / CSV 导出；详情支持复制和保存请求、响应原文
 - 本地代理 Bearer Token 验证
 - 系统托盘 / macOS 菜单栏常驻；关闭窗口只会隐藏，macOS 可通过 Dock 图标重新打开
 - 手动连接测试
@@ -74,6 +75,12 @@ pnpm tauri dev
 
 ```sh
 pnpm build
+```
+
+前端导出逻辑测试：
+
+```sh
+pnpm test
 ```
 
 Rust 检查和测试：
@@ -319,6 +326,8 @@ ChatGPT OAuth 的 access/refresh token 保存在应用数据目录的 `codex_oau
 - 内容类型、已保存字节数和传输是否完整
 
 内容文件位于 SQLite 数据库同级的 `captures` 目录。内容记录默认关闭；启用后不会设置大小或数量上限，直到你在请求记录页手动清空。
+
+请求记录页可选择单条或多条记录，批量复制为 JSON，或通过系统保存对话框导出 JSON / CSV。未选择记录时，导出范围为全部记录；选择后仅导出所选记录。JSON 和复制默认包含已记录的请求与响应正文，可取消勾选以仅输出元数据。正文未记录时不会补录；读取失败会在对应记录的 `captureReadError` 中说明。CSV 仅包含元数据和 Token 用量，使用带 BOM 的 UTF-8 编码，适合在 Excel 中打开。详情中的“复制请求 / 响应”和“保存原文”保留已读取的 JSON 或 SSE 文本，不作格式化。
 
 无论是否开启内容记录，都不会保存：
 

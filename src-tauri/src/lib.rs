@@ -5,6 +5,7 @@ mod logging;
 mod models;
 mod network;
 mod proxy;
+mod request_export;
 mod state;
 mod storage;
 
@@ -30,6 +31,8 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let log_path = logging::init(&app_data_dir)?;
@@ -107,6 +110,8 @@ pub fn run() {
             commands::get_request_capture,
             commands::clear_request_captures,
             commands::clear_request_logs,
+            request_export::copy_request_content,
+            request_export::save_request_export,
             commands::get_codex_setup,
             commands::get_codex_connection,
             commands::switch_codex_connection,
